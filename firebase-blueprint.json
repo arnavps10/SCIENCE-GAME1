@@ -1,0 +1,54 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "A user of the application",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "password": { "type": "string" },
+        "highScore": { "type": "number" },
+        "lastPlayed": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "password"]
+    },
+    "LeaderboardEntry": {
+      "title": "Leaderboard Entry",
+      "description": "An entry in the global leaderboard",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "name": { "type": "string" },
+        "score": { "type": "number" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "name", "score", "timestamp"]
+    },
+    "Sabotage": {
+      "title": "Sabotage",
+      "description": "A sabotage event targeting a player",
+      "type": "object",
+      "properties": {
+        "targetName": { "type": "string" },
+        "type": { "type": "string", "enum": ["BLUR", "INVERT", "SPEED_UP", "SHAKE", "DARKNESS", "MIRROR"] },
+        "duration": { "type": "number" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["targetName", "type", "duration", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles and credentials"
+    },
+    "/leaderboard/{entryId}": {
+      "schema": "LeaderboardEntry",
+      "description": "Global high scores"
+    },
+    "/sabotages/{sabotageId}": {
+      "schema": "Sabotage",
+      "description": "Active sabotage events"
+    }
+  }
+}

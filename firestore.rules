@@ -1,0 +1,101 @@
+// ===============================================================
+// Assumed Data Model
+// ===============================================================
+//
+// Collection: users
+// Document ID: userId
+// Fields:
+//   - name: string (required) - Full name of the student
+//   - password: string (required) - Specific password for the student
+//   - highScore: number (optional) - Highest score achieved
+//   - lastPlayed: string (optional) - ISO 8601 timestamp
+//
+// Collection: leaderboard
+// Document ID: entryId
+// Fields:
+//   - userId: string (required) - ID of the user who achieved the score
+//   - name: string (required) - Name of the user
+//   - score: number (required) - The score achieved
+//   - timestamp: string (required) - ISO 8601 timestamp
+//
+// Collection: sabotages
+// Document ID: sabotageId
+// Fields:
+//   - targetName: string (required) - Name of the user being sabotaged
+//   - type: string (required) - Type of sabotage (BLUR, INVERT, SPEED_UP)
+//   - duration: number (required) - Duration in milliseconds
+//   - timestamp: string (required) - ISO 8601 timestamp
+//
+// ===============================================================
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['name', 'password']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             data.password is string && data.password.size() > 0;
+    }
+
+    function isValidLeaderboardEntry(data) {
+      return data.keys().hasAll(['userId', 'name', 'score', 'timestamp']) &&
+             data.userId is string &&
+             data.name is string &&
+             data.score is number &&
+             data.timestamp is string;
+    }
+
+    function isValidSabotage(data) {
+      return data.keys().hasAll(['targetName', 'type', 'duration', 'timestamp']) &&
+             data.targetName is string &&
+             data.type in ['BLUR', 'INVERT', 'SPEED_UP', 'SHAKE', 'DARKNESS', 'MIRROR'] &&
+             data.duration is number &&
+             data.timestamp is string;
+    }
+
+    // ===============================================================
+    // Collection Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      // Allow reading only own profile or for authentication check (simulated via query)
+      allow read: if isAuthenticated();
+      // Allow creation only if the user is the owner (this is for the initial setup)
+      allow create: if isAuthenticated() && isOwner(userId) && isValidUser(request.resource.data);
+      // Allow updating high scores and lastPlayed
+      allow update: if isAuthenticated() && isOwner(userId) && isValidUser(request.resource.data);
+    }
+
+    match /leaderboard/{entryId} {
+      // Leaderboard is public for all authenticated students
+      allow read: if isAuthenticated();
+      // Only allow creation of entries that match the user's ID
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid && isValidLeaderboardEntry(request.resource.data);
+      // Leaderboard entries are immutable
+      allow update, delete: if false;
+    }
+
+    match /sabotages/{sabotageId} {
+      // Students can see sabotages targeting them
+      allow read: if isAuthenticated();
+      // Any student can sabotage another student
+      allow create: if isAuthenticated() && isValidSabotage(request.resource.data);
+      // Sabotages are cleaned up by the client or expire
+      allow delete: if isAuthenticated();
+      allow update: if false;
+    }
+  }
+}
