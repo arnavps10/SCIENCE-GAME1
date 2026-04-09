@@ -40,14 +40,16 @@ import {
   EyeOff,
   Ghost,
   Zap as SabotageIcon,
+  FastForward,
+  LogOut,
 } from 'lucide-react';
-import { auth, db, signIn, saveHighScore, getLeaderboard, sendSabotage } from './firebase';
+import { auth, db, signIn, logOut, saveHighScore, getLeaderboard, sendSabotage, createMatch, joinMatch, listenToMatch, updateMatchPlayer, listenForSabotage } from './firebase';
 import { onAuthStateChanged } from 'firebase/auth';
 import { doc, getDoc, setDoc, collection, addDoc, query, where, orderBy, limit, onSnapshot, deleteDoc, getDocs } from 'firebase/firestore';
 
 // --- Audio Service (Synthesized) ---
 
-const playSound = (type: 'CLICK' | 'MISS' | 'POWERUP' | 'WIN' | 'BOSS_HIT' | 'COMBO' | 'LEVEL_UP' | 'MUTATION' | EntityType) => {
+const playSound = (type: 'CLICK' | 'MISS' | 'POWERUP' | 'WIN' | 'BOSS_HIT' | 'COMBO' | 'COMBO_BREAK' | 'LEVEL_UP' | 'MUTATION' | EntityType) => {
   try {
     const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
     const osc = ctx.createOscillator();
@@ -59,6 +61,15 @@ const playSound = (type: 'CLICK' | 'MISS' | 'POWERUP' | 'WIN' | 'BOSS_HIT' | 'CO
     const now = ctx.currentTime;
 
     switch (type) {
+      case 'COMBO_BREAK':
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(150, now);
+        osc.frequency.exponentialRampToValueAtTime(50, now + 0.3);
+        gain.gain.setValueAtTime(0.3, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.3);
+        osc.start(now);
+        osc.stop(now + 0.3);
+        break;
       case 'ALCOHOL':
         osc.type = 'sine';
         osc.frequency.setValueAtTime(300, now);
@@ -250,7 +261,7 @@ const STUDENTS = [
   { name: "Michael Zhao", password: "Michael2026!" }
 ];
 
-type GameState = 'LOGIN' | 'START' | 'DIFFICULTY' | 'PLAYING' | 'BOSS_INTRO' | 'LEVEL_TRANSITION' | 'LEVEL_COMPLETE' | 'GAME_OVER' | 'GAME_FINISHED' | 'SHOP' | 'LEADERBOARD' | 'TUTORIAL' | 'INFO';
+type GameState = 'LOGIN' | 'START' | 'DIFFICULTY' | 'PLAYING' | 'BOSS_INTRO' | 'LEVEL_TRANSITION' | 'LEVEL_COMPLETE' | 'GAME_OVER' | 'GAME_FINISHED' | 'SHOP' | 'LEADERBOARD' | 'TUTORIAL' | 'INFO' | 'MULTIPLAYER_LOBBY';
 type Difficulty = 'EASY' | 'MEDIUM' | 'HARD';
 
 type EntityType = 'ALCOHOL' | 'TOXIN_HEAVY' | 'TOXIN_PESTICIDE' | 'VIRUS' | 'FAT' | 'CANCER' | 'HEALTH_BOOST' | 'TIME_DILATION' | 'DETOX_BLAST' | 'IMMUNITY' | 'SCORE_FRENZY' | 'BOSS' | 'EASTER_EGG' | 'LAVA_BALL';
@@ -258,6 +269,8 @@ type EntityType = 'ALCOHOL' | 'TOXIN_HEAVY' | 'TOXIN_PESTICIDE' | 'VIRUS' | 'FAT
 interface EasterEggData {
   message: string;
   powerup: string;
+  description: string;
+  duration: number;
   isRare?: boolean;
 }
 
@@ -285,6 +298,16 @@ interface FloatingText {
   color: string;
 }
 
+interface Particle {
+  id: number;
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  color: string;
+  life: number;
+}
+
 interface ShopItem {
   id: string;
   name: string;
@@ -298,8 +321,8 @@ interface ShopItem {
 
 const DIFFICULTY_CONFIG = {
   EASY: { speedMult: 1, spawnMult: 1, scoreMult: 1, healthSpawnChance: 0.08 },
-  MEDIUM: { speedMult: 1.3, spawnMult: 1.3, scoreMult: 1.5, healthSpawnChance: 0.04 },
-  HARD: { speedMult: 1.6, spawnMult: 1.6, scoreMult: 2, healthSpawnChance: 0.01 },
+  MEDIUM: { speedMult: 1.2, spawnMult: 1.2, scoreMult: 1.5, healthSpawnChance: 0.05 },
+  HARD: { speedMult: 1.5, spawnMult: 1.5, scoreMult: 2, healthSpawnChance: 0.02 },
 };
 
 const LEVELS = [
@@ -336,24 +359,33 @@ const LEVELS = [
 ];
 
 const SHOP_ITEMS: ShopItem[] = [
-  { id: 'HEALTH_KIT', name: 'Regen Kit', description: 'Instantly restore 25% health.', cost: 50, icon: <PlusCircle className="text-green-500" /> },
-  { id: 'SHIELD', name: 'Membrane Shield', description: 'Next 3 misses don\'t damage health.', cost: 100, icon: <ShieldCheck className="text-blue-500" /> },
-  { id: 'SLOW_MO', name: 'Time Dilation', description: 'Slow down entities for 10 seconds.', cost: 150, icon: <Clock className="text-purple-500" /> },
+  { id: 'HEALTH_KIT', name: 'Regen Kit', description: 'Instantly restores 25% of your total health.', cost: 50, icon: <PlusCircle className="text-green-500" /> },
+  { id: 'SHIELD', name: 'Membrane Shield', description: 'Deploys a protective barrier that absorbs the next 3 hits.', cost: 100, icon: <ShieldCheck className="text-blue-500" /> },
+  { id: 'SLOW_MO', name: 'Time Dilation', description: 'Slows down all incoming threats for 10 seconds.', cost: 150, icon: <Clock className="text-purple-500" /> },
+  { id: 'UPGRADE_SCORE', name: 'Score Multiplier', description: 'Permanently increases all score gains by 50%.', cost: 500, icon: <Flame className="text-orange-500" /> },
+  { id: 'UPGRADE_SPEED', name: 'Speed Reduction', description: 'Permanently slows down enemy movement by 15%.', cost: 600, icon: <Zap className="text-blue-400" /> },
+  { id: 'AUTO_CLICKER', name: 'Auto-Immunity', description: 'Automatically neutralizes one threat every 3 seconds.', cost: 1000, icon: <Activity className="text-green-500" /> },
 ];
 
 const EASTER_EGGS: EasterEggData[] = [
-  { message: "Arin sucks", powerup: "ARIN_SLOW" },
-  { message: "Arnav beat arin inthe shoe fight!!!", powerup: "SHOE_STRIKE" },
-  { message: "Mrs.Penaverde is the best teacher!", powerup: "BEST_TEACHER" },
-  { message: "DNAs are so fun", powerup: "DNA_FUN" },
-  { message: "Kamalesh is the goat!!!", powerup: "GOAT_MODE" },
-  { message: "Vilo needs a job!!", powerup: "VILO_JOB" },
-  { message: "Mrs.Penaverde increase my grade please!!!", powerup: "GRADE_BOOST", isRare: true },
+  { message: "Arin sucks", powerup: "ARIN_SLOW", description: "Extreme Slow Motion: Everything crawls for 20s.", duration: 20 },
+  { message: "Arnav beat arin inthe shoe fight!!!", powerup: "SHOE_STRIKE", description: "Shoe Strike: Instantly clears all enemies + 500 PTS.", duration: 0 },
+  { message: "Mrs.Penaverde is the best teacher!", powerup: "BEST_TEACHER", description: "Teacher's Pet: 10x Score Multiplier for 20s.", duration: 20 },
+  { message: "DNAs are so fun", powerup: "DNA_FUN", description: "DNA Overload: Full Health + 20 Shields.", duration: 0 },
+  { message: "Kamalesh is the goat!!!", powerup: "GOAT_MODE", description: "GOAT Mode: Immunity, Score Frenzy, & Slow Mo for 30s.", duration: 30 },
+  { message: "Vilo needs a job!!", powerup: "VILO_JOB", description: "Vilo's Paycheck: Massive Point Infusion (+2500 PTS).", duration: 0 },
+  { message: "Mrs.Penaverde increase my grade please!!!", powerup: "GRADE_BOOST", description: "God Mode: Invincible, Max Damage, & Slow Mo for 30s.", duration: 30, isRare: true },
+  { message: "Mitochondria is the powerhouse of the cell!", powerup: "MITO_POWER", description: "Mito-Power: Rapid Fire Auto-Clicker for 10s.", duration: 10 },
+  { message: "Lysosomes are the garbage disposals!", powerup: "LYSO_CONVERT", description: "Lysosome Conversion: Converts all enemies to Health Boosts.", duration: 0 },
+  { message: "Ribosomes make proteins!", powerup: "RIBO_HEAL", description: "Ribosome Heal: Instantly regenerate 50 HP.", duration: 0 },
+  { message: "Saahib is an unc", powerup: "UNC_MODE", description: "Old Man Strength: Slows enemies, +5 Shields, +500 PTS.", duration: 10, isRare: true },
+  { message: "Vikhyat is weird!", powerup: "VIKHYAT_WEIRD", description: "Vikhyat's Weirdness: Randomizes enemy types + 500 PTS.", duration: 0 },
+  { message: "No 5 Dollars Justin", powerup: "NO_5_DOLLARS_JUSTIN", description: "Safe from next fails + 5 extra health bars", duration: 0 },
 ];
 
 // --- Components ---
 
-const EntityVisual = ({ type, health, maxHealth, isMutated }: { type: EntityType, health: number, maxHealth: number, isMutated?: boolean }) => {
+const EntityVisual = ({ type, health, maxHealth, isMutated, isAttacking }: { type: EntityType, health: number, maxHealth: number, isMutated?: boolean, isAttacking?: boolean }) => {
   const isBoss = type === 'BOSS';
   
   const renderIcon = () => {
@@ -365,11 +397,11 @@ const EntityVisual = ({ type, health, maxHealth, isMutated }: { type: EntityType
       case 'FAT': return <CircleDot className="w-2/3 h-2/3 text-yellow-400" />;
       case 'CANCER': return (
         <motion.div
-          animate={isMutated ? { scale: [1, 1.2, 1], filter: ["hue-rotate(0deg)", "hue-rotate(90deg)", "hue-rotate(0deg)"] } : {}}
-          transition={{ duration: 0.5, repeat: Infinity }}
+          animate={isMutated ? { scale: [1, 1.3, 1], rotate: [0, 10, -10, 0] } : {}}
+          transition={{ duration: 0.3, repeat: Infinity }}
           className="w-full h-full flex items-center justify-center"
         >
-          <Dna className={`w-2/3 h-2/3 ${isMutated ? 'text-red-600' : 'text-indigo-600'}`} />
+          <Dna className={`w-2/3 h-2/3 ${isMutated ? 'text-red-600 drop-shadow-[0_0_10px_rgba(220,38,38,0.8)]' : 'text-indigo-600'}`} />
         </motion.div>
       );
       case 'HEALTH_BOOST': return <Heart className="w-2/3 h-2/3 text-green-400 fill-green-400" />;
@@ -402,23 +434,23 @@ const EntityVisual = ({ type, health, maxHealth, isMutated }: { type: EntityType
         </motion.div>
       );
       case 'BOSS': return (
-        <div className="relative w-full h-full flex items-center justify-center overflow-hidden">
+        <div className={`relative w-full h-full flex items-center justify-center overflow-hidden transition-transform ${isAttacking ? 'scale-125' : ''}`}>
           <motion.div 
             animate={{ scale: [1, 1.1, 1], rotate: [0, 5, -5, 0] }}
             transition={{ duration: 2, repeat: Infinity }}
             className="absolute inset-0 flex items-center justify-center"
           >
-            <Skull className="w-3/4 h-3/4 text-white opacity-20" />
+            <Skull className={`w-3/4 h-3/4 ${isAttacking ? 'text-red-500' : 'text-white'} opacity-20 transition-colors`} />
           </motion.div>
           
           {/* Core Pulsing */}
           <motion.div 
             animate={{ scale: [1, 1.3, 1], opacity: [0.5, 1, 0.5] }}
             transition={{ duration: 1, repeat: Infinity }}
-            className="absolute w-1/2 h-1/2 rounded-full bg-red-600 blur-xl z-0"
+            className={`absolute w-1/2 h-1/2 rounded-full ${isAttacking ? 'bg-yellow-500' : 'bg-red-600'} blur-xl z-0 transition-colors`}
           />
 
-          <AlertCircle className="w-1/2 h-1/2 text-white z-10" />
+          <AlertCircle className={`w-1/2 h-1/2 ${isAttacking ? 'text-yellow-400' : 'text-white'} z-10 transition-colors`} />
           
           {/* Rotating Rings */}
           <motion.div 
@@ -472,35 +504,79 @@ const EntityVisual = ({ type, health, maxHealth, isMutated }: { type: EntityType
       )}
       {isBoss && <div className="absolute -top-12 font-black uppercase text-red-600 tracking-[0.2em] text-2xl animate-pulse drop-shadow-lg">CORE THREAT</div>}
       {isMutated && <div className="absolute -top-6 text-[10px] font-black text-red-600 uppercase bg-white px-1 border border-red-600">MUTATED</div>}
+      {maxHealth > 1 && !isBoss && (
+        <div className="absolute -bottom-4 left-1/2 -translate-x-1/2 w-full max-w-[40px] h-2 bg-slate-900 border border-white">
+          <div 
+            className="h-full bg-red-500 transition-all"
+            style={{ width: `${(health / maxHealth) * 100}%` }}
+          />
+        </div>
+      )}
+    </div>
+  );
+};
+
+const PowerupTimer: React.FC<{ name: string, endTime: number, icon: React.ReactNode }> = ({ name, endTime, icon }) => {
+  const [timeLeft, setTimeLeft] = useState(Math.max(0, Math.ceil((endTime - Date.now()) / 1000)));
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const remaining = Math.max(0, Math.ceil((endTime - Date.now()) / 1000));
+      setTimeLeft(remaining);
+      if (remaining === 0) clearInterval(interval);
+    }, 100);
+    return () => clearInterval(interval);
+  }, [endTime]);
+
+  if (timeLeft === 0) return null;
+
+  return (
+    <div className="flex items-center gap-2 bg-slate-900 text-white px-3 py-1 border-2 border-white neo-brutalist-shadow">
+      {icon}
+      <span className="font-black text-sm">{timeLeft}s</span>
     </div>
   );
 };
 
 const VisualHealthBar = ({ health }: { health: number }) => {
-  const segments = 10;
-  const activeSegments = Math.ceil(health / (100 / segments));
-  
   return (
-    <motion.div 
-      animate={health < 30 ? { x: [-2, 2, -2, 2, 0] } : {}}
-      transition={{ repeat: Infinity, duration: 0.1 }}
-      className="flex gap-1 h-8 w-48 border-4 border-slate-900 p-1 bg-white"
-    >
-      {Array.from({ length: segments }).map((_, i) => (
-        <motion.div
-          key={i}
-          initial={false}
-          animate={{ 
-            backgroundColor: i < activeSegments 
-              ? (health < 30 ? '#dc2626' : '#22c55e') 
-              : '#f1f5f9',
-            scaleY: i < activeSegments ? [1, 1.1, 1] : 1
-          }}
-          transition={{ duration: 0.3 }}
-          className="flex-1"
-        />
-      ))}
-    </motion.div>
+    <div className="relative h-8 w-48 border-4 border-slate-900 bg-slate-100 p-1 overflow-hidden">
+      <motion.div
+        className={`absolute top-1 left-1 bottom-1 ${health < 30 ? 'bg-red-500' : 'bg-green-500'}`}
+        initial={{ width: '100%' }}
+        animate={{ width: `${health}%` }}
+        transition={{ type: 'spring', stiffness: 100, damping: 20 }}
+      />
+      <div className="absolute inset-0 flex items-center justify-center font-black text-sm text-slate-900">
+        {Math.ceil(health)}%
+      </div>
+    </div>
+  );
+};
+
+const BossTimer = ({ endTime, isAttacking }: { endTime: number | null, isAttacking: boolean }) => {
+  const [timeLeft, setTimeLeft] = useState(0);
+
+  useEffect(() => {
+    if (!endTime) return;
+    const interval = setInterval(() => {
+      const remaining = Math.max(0, endTime - Date.now());
+      setTimeLeft(remaining);
+    }, 50);
+    return () => clearInterval(interval);
+  }, [endTime]);
+
+  if (!endTime || timeLeft <= 0) return null;
+
+  return (
+    <div className="text-center mt-2">
+      <div className={`text-xs font-black uppercase tracking-widest ${isAttacking ? 'text-red-400' : 'text-green-400'}`}>
+        {isAttacking ? 'Invulnerable & Spawning' : 'Vulnerable'}
+      </div>
+      <div className="text-white font-mono text-sm">
+        {(timeLeft / 1000).toFixed(1)}s
+      </div>
+    </div>
   );
 };
 
@@ -533,12 +609,26 @@ export default function App() {
   const [tutorialStep, setTutorialStep] = useState(0);
   const [clickEffects, setClickEffects] = useState<{ id: number, x: number, y: number }[]>([]);
   const [floatingTexts, setFloatingTexts] = useState<FloatingText[]>([]);
+  const [particles, setParticles] = useState<Particle[]>([]);
   const [screenShake, setScreenShake] = useState(false);
   const [leaderboard, setLeaderboard] = useState<{ name: string, score: number }[]>([]);
+  const [upgradeScoreMult, setUpgradeScoreMult] = useState(1);
+  const [upgradeSpeedReduce, setUpgradeSpeedReduce] = useState(1);
+  const [hasAutoClicker, setHasAutoClicker] = useState(false);
   const [activeEasterEgg, setActiveEasterEgg] = useState<EasterEggData | null>(null);
+  const [powerupEndTime, setPowerupEndTime] = useState<number | null>(null);
+  const [currentMatch, setCurrentMatch] = useState<any | null>(null);
+  const [isMultiplayer, setIsMultiplayer] = useState(false);
   const [gradeBoostActive, setGradeBoostActive] = useState(false);
   const [bestTeacherActive, setBestTeacherActive] = useState(false);
   const [showExitConfirm, setShowExitConfirm] = useState(false);
+  const [pendingGameState, setPendingGameState] = useState<GameState | null>(null);
+  const [previousGameState, setPreviousGameState] = useState<GameState | null>(null);
+  const [bossPhaseEndTime, setBossPhaseEndTime] = useState<number | null>(null);
+  const [shopFeedback, setShopFeedback] = useState<{message: string, type: 'success' | 'error'} | null>(null);
+  const [sabotageTargetSelection, setSabotageTargetSelection] = useState<{ item: any, activeUsers: string[] } | null>(null);
+  const [powerupTimers, setPowerupTimers] = useState<Record<string, number>>({});
+  const [joinCode, setJoinCode] = useState('');
   
   const gameAreaRef = useRef<HTMLDivElement>(null);
   const currentLevel = LEVELS[levelIndex];
@@ -550,26 +640,48 @@ export default function App() {
   // --- Persistence ---
 
   useEffect(() => {
-    const savedPoints = localStorage.getItem('hepatohero_points');
-    const savedLevel = localStorage.getItem('hepatohero_level');
-    const savedLeaderboard = localStorage.getItem('hepatohero_leaderboard');
-    
-    if (savedPoints) setTotalPoints(parseInt(savedPoints));
-    if (savedLevel) setLevelIndex(parseInt(savedLevel));
-    if (savedLeaderboard) setLeaderboard(JSON.parse(savedLeaderboard));
+    const q = query(collection(db, 'leaderboard'), orderBy('score', 'desc'), limit(10));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const entries = snapshot.docs.map(doc => doc.data() as { name: string, score: number });
+      setLeaderboard(entries);
+    });
+    return () => unsubscribe();
   }, []);
 
   useEffect(() => {
-    localStorage.setItem('hepatohero_points', totalPoints.toString());
-    localStorage.setItem('hepatohero_level', levelIndex.toString());
-  }, [totalPoints, levelIndex]);
+    if (currentUser) {
+      const timeoutId = setTimeout(() => {
+        setDoc(doc(db, 'users', currentUser.id), {
+          totalPoints,
+          levelIndex,
+          upgradeScoreMult,
+          upgradeSpeedReduce,
+          hasAutoClicker
+        }, { merge: true }).catch(console.error);
+      }, 2000);
+      return () => clearTimeout(timeoutId);
+    }
+  }, [totalPoints, levelIndex, upgradeScoreMult, upgradeSpeedReduce, hasAutoClicker, currentUser]);
 
-  const updateLeaderboard = (finalScore: number) => {
-    const name = prompt("Enter your name for the leaderboard:") || "Anonymous";
-    const newEntry = { name, score: finalScore };
-    const updated = [...leaderboard, newEntry].sort((a, b) => b.score - a.score).slice(0, 10);
-    setLeaderboard(updated);
-    localStorage.setItem('hepatohero_leaderboard', JSON.stringify(updated));
+  const updateLeaderboard = async (finalScore: number) => {
+    if (!currentUser) return;
+    
+    try {
+      const newEntry = {
+        userId: currentUser.id,
+        name: currentUser.name,
+        score: finalScore,
+        timestamp: new Date().toISOString()
+      };
+      await setDoc(doc(db, 'leaderboard', `${currentUser.id}_${Date.now()}`), newEntry);
+      
+      if (finalScore > currentUser.highScore) {
+        await setDoc(doc(db, 'users', currentUser.id), { highScore: finalScore }, { merge: true });
+        setCurrentUser(prev => prev ? { ...prev, highScore: finalScore } : null);
+      }
+    } catch (error) {
+      console.error("Failed to update leaderboard:", error);
+    }
   };
 
   // --- Game Logic ---
@@ -583,6 +695,13 @@ export default function App() {
         if (userDoc.exists()) {
           const userData = userDoc.data();
           setCurrentUser({ id: user.uid, name: userData.name, highScore: userData.highScore || 0 });
+          
+          if (userData.totalPoints !== undefined) setTotalPoints(userData.totalPoints);
+          if (userData.levelIndex !== undefined) setLevelIndex(userData.levelIndex);
+          if (userData.upgradeScoreMult !== undefined) setUpgradeScoreMult(userData.upgradeScoreMult);
+          if (userData.upgradeSpeedReduce !== undefined) setUpgradeSpeedReduce(userData.upgradeSpeedReduce);
+          if (userData.hasAutoClicker !== undefined) setHasAutoClicker(userData.hasAutoClicker);
+          
           setGameState('START');
         }
       } else {
@@ -647,6 +766,12 @@ export default function App() {
       return () => unsubscribe();
     }
   }, [gameState]);
+
+  const handleLogout = async () => {
+    await logOut();
+    setCurrentUser(null);
+    setGameState('LOGIN');
+  };
 
   const handleLogin = async (name: string, pass: string) => {
     const trimmedName = name.trim();
@@ -713,7 +838,11 @@ export default function App() {
       const spawnX = fromLeft ? -100 : rect.width + 100;
       const spawnY = Math.random() * (rect.height - 100) + 50;
       const isRare = Math.random() < 0.1; // 10% chance for rare grade boost
-      const eggData = isRare ? EASTER_EGGS[EASTER_EGGS.length - 1] : EASTER_EGGS[Math.floor(Math.random() * (EASTER_EGGS.length - 1))];
+      const rareEggs = EASTER_EGGS.filter(e => e.isRare);
+      const commonEggs = EASTER_EGGS.filter(e => !e.isRare);
+      const eggData = (isRare && rareEggs.length > 0) 
+        ? rareEggs[Math.floor(Math.random() * rareEggs.length)] 
+        : commonEggs[Math.floor(Math.random() * commonEggs.length)];
 
       const newEgg: Entity = {
         id: Date.now() + Math.random(),
@@ -741,9 +870,9 @@ export default function App() {
       y: -100,
       type,
       size: type === 'CANCER' ? 70 : 60,
-      speed: (isSlowMo ? 0.5 : (1.5 + Math.random() * 2 + (levelIndex * 0.4))) * config.speedMult,
-      health: type === 'CANCER' ? 3 : 1,
-      maxHealth: type === 'CANCER' ? 3 : 1,
+      speed: (isSlowMo ? 0.5 : (1.5 + Math.random() * 2 + (levelIndex * 0.4))) * config.speedMult * upgradeSpeedReduce,
+      health: type === 'CANCER' ? 2 : 1,
+      maxHealth: type === 'CANCER' ? 2 : 1,
       rotation: Math.random() * 360,
       spawnTime: Date.now(),
     };
@@ -771,7 +900,24 @@ export default function App() {
     setBossActive(true);
   }, [config.scoreMult]);
 
+  const skipLevel = () => {
+    if (totalPoints >= 150) {
+      setTotalPoints(prev => prev - 150);
+      if (levelIndex < LEVELS.length - 1) {
+        setLevelIndex(prev => prev + 1);
+        setGameState('LEVEL_TRANSITION');
+        setScore(0);
+        setEntities([]);
+        setBossActive(false);
+        playSound('LEVEL_UP');
+      } else {
+        setGameState('GAME_FINISHED');
+      }
+    }
+  };
+
   const startGame = (diff: Difficulty) => {
+    playSound('CLICK');
     setDifficulty(diff);
     setGameState('PLAYING');
     setScore(0);
@@ -782,6 +928,7 @@ export default function App() {
   };
 
   const startBossDev = () => {
+    playSound('CLICK');
     setDifficulty('HARD');
     setLevelIndex(2);
     setGameState('PLAYING');
@@ -812,6 +959,24 @@ export default function App() {
     setTimeout(() => setFloatingTexts(prev => prev.filter(t => t.id !== id)), 1000);
   };
 
+  const spawnParticles = (x: number, y: number, color: string, count: number = 8) => {
+    const newParticles: Particle[] = [];
+    for (let i = 0; i < count; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const speed = Math.random() * 10 + 5;
+      newParticles.push({
+        id: Date.now() + Math.random(),
+        x,
+        y,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed,
+        color,
+        life: 1.0
+      });
+    }
+    setParticles(prev => [...prev, ...newParticles]);
+  };
+
   const triggerScreenShake = () => {
     setScreenShake(true);
     setTimeout(() => setScreenShake(false), 200);
@@ -823,34 +988,32 @@ export default function App() {
     setClickEffects(prev => [...prev, { id: effectId, x, y }]);
     setTimeout(() => setClickEffects(prev => prev.filter(e => e.id !== effectId)), 500);
 
+    let particleColor = '#ef4444'; // default red
+    if (type === 'HEALTH_BOOST') particleColor = '#22c55e';
+    else if (type === 'TIME_DILATION') particleColor = '#3b82f6';
+    else if (type === 'DETOX_BLAST') particleColor = '#a855f7';
+    else if (type === 'IMMUNITY') particleColor = '#eab308';
+    else if (type === 'SCORE_FRENZY') particleColor = '#f97316';
+    else if (type === 'ALCOHOL' || type === 'TOXIN_HEAVY' || type === 'TOXIN_PESTICIDE') particleColor = '#10b981';
+    else if (type === 'VIRUS') particleColor = '#8b5cf6';
+    else if (type === 'FAT') particleColor = '#fcd34d';
+    else if (type === 'CANCER') particleColor = '#000000';
+    
+    spawnParticles(x, y, particleColor, type === 'BOSS' ? 20 : 8);
+
     if (type === 'BOSS') {
+      if (bossAttacking) {
+        addFloatingText(x, y, "INVULNERABLE!", "text-slate-500");
+        playSound('MISS');
+        return;
+      }
+
       playSound('BOSS_HIT');
       triggerScreenShake();
       setEntities(prev => prev.map(e => {
         if (e.id === id) {
           const newHealth = e.health - 1;
           addFloatingText(x, y, "-1 HP", "text-red-600");
-          // Boss counter-attack or minion spawn
-          if (newHealth > 0 && newHealth % 3 === 0) {
-            setBossAttacking(true);
-            setTimeout(() => setBossAttacking(false), 500);
-            setTimeout(() => {
-              const attackType = Math.random() > 0.5 ? 'CANCER' : (Math.random() > 0.5 ? 'TOXIN' : 'ALCOHOL');
-              setEntities(curr => [...curr, {
-                id: Math.random(),
-                x: e.x + (Math.random() * 150 - 75),
-                y: e.y + (Math.random() * 100 - 50),
-                type: attackType,
-                size: attackType === 'CANCER' ? 40 : 50,
-                speed: attackType === 'CANCER' ? 4 : 5,
-                health: 1,
-                maxHealth: 1,
-                rotation: 0,
-                spawnTime: Date.now(),
-                isMutated: attackType === 'CANCER'
-              }]);
-            }, 100);
-          }
           return { ...e, health: newHealth };
         }
         return e;
@@ -861,7 +1024,7 @@ export default function App() {
         setScore(s => s + 10);
         setTotalPoints(p => p + 100);
         if (currentUser) {
-          saveHighScore(currentUser.id, currentUser.name, score + 10);
+          updateLeaderboard(score + 10);
         }
         if (levelIndex === LEVELS.length - 1) {
           setGameState('GAME_FINISHED');
@@ -907,17 +1070,24 @@ export default function App() {
         playSound('POWERUP');
         setActiveEasterEgg(egg.easterEggData);
         
+        const durationMs = egg.easterEggData.duration * 1000;
+        if (durationMs > 0) {
+          setPowerupEndTime(Date.now() + durationMs);
+        } else {
+          setPowerupEndTime(null);
+        }
+        
         // Apply Powerup
         const pType = egg.easterEggData.powerup;
         if (pType === 'ARIN_SLOW') {
           setIsSlowMo(true);
-          setTimeout(() => setIsSlowMo(false), 20000); // 20s slow mo
+          setTimeout(() => setIsSlowMo(false), durationMs);
         } else if (pType === 'SHOE_STRIKE') {
           setEntities(prev => prev.filter(e => e.type === 'BOSS' || e.type === 'EASTER_EGG'));
           setScore(s => s + 500); // 500 score
         } else if (pType === 'BEST_TEACHER') {
           setBestTeacherActive(true);
-          setTimeout(() => setBestTeacherActive(false), 20000); // 20s 10x score
+          setTimeout(() => setBestTeacherActive(false), durationMs);
         } else if (pType === 'DNA_FUN') {
           setHealth(100);
           setShieldCount(s => s + 20); // 20 shields
@@ -927,7 +1097,7 @@ export default function App() {
           setTimeout(() => {
             setIsImmune(false);
             setIsScoreFrenzy(false);
-          }, 20000); // 20s
+          }, durationMs);
         } else if (pType === 'VILO_JOB') {
           setTotalPoints(p => p + 2500); // 2500 points
           setScore(s => s + 2500);
@@ -942,16 +1112,41 @@ export default function App() {
             setIsImmune(false);
             setIsScoreFrenzy(false);
             setIsSlowMo(false);
-          }, 30000); // 30s
+          }, durationMs);
+        } else if (pType === 'MITO_POWER') {
+          setHasAutoClicker(true);
+          setTimeout(() => setHasAutoClicker(false), durationMs);
+        } else if (pType === 'LYSO_CONVERT') {
+          setEntities(prev => prev.map(e => (e.type !== 'BOSS' && e.type !== 'EASTER_EGG') ? { ...e, type: 'HEALTH_BOOST' } : e));
+          setScore(s => s + 500);
+        } else if (pType === 'RIBO_HEAL') {
+          setHealth(h => Math.min(100, h + 50));
+        } else if (pType === 'UNC_MODE') {
+          setIsSlowMo(true);
+          setShieldCount(s => s + 5);
+          setScore(s => s + 500);
+          setTotalPoints(p => p + 500);
+          setTimeout(() => setIsSlowMo(false), durationMs);
+        } else if (pType === 'VIKHYAT_WEIRD') {
+          const enemyTypes: EntityType[] = ['ALCOHOL', 'TOXIN_HEAVY', 'TOXIN_PESTICIDE', 'VIRUS', 'FAT', 'CANCER'];
+          setEntities(prev => prev.map(e => (e.type !== 'BOSS' && e.type !== 'EASTER_EGG' && e.type !== 'HEALTH_BOOST') ? { ...e, type: enemyTypes[Math.floor(Math.random() * enemyTypes.length)] } : e));
+          setScore(s => s + 500);
+          setTotalPoints(p => p + 500);
+        } else if (pType === 'NO_5_DOLLARS_JUSTIN') {
+          setShieldCount(s => s + 1);
+          setHealth(h => Math.min(100, h + 5));
         }
 
-        setTimeout(() => setActiveEasterEgg(null), 4000);
+        setTimeout(() => {
+          setActiveEasterEgg(null);
+          setPowerupEndTime(null);
+        }, durationMs > 0 ? durationMs : 4000);
       }
     } else {
       playSound(type);
       const comboBonus = Math.floor(combos / 5);
       const basePoints = 10 * config.scoreMult;
-      const points = Math.floor(basePoints * (1 + comboBonus) * (isScoreFrenzy ? 2 : 1) * (bestTeacherActive ? 10 : 1));
+      const points = Math.floor(basePoints * (1 + comboBonus) * (isScoreFrenzy ? 2 : 1) * (bestTeacherActive ? 10 : 1) * upgradeScoreMult);
       setScore(s => s + points);
       setTotalPoints(p => p + points);
       setCombos(c => c + 1);
@@ -986,6 +1181,10 @@ export default function App() {
     }
 
     if (totalPoints >= item.cost) {
+      if (!window.confirm(`Are you sure you want to buy ${item.name} for ${item.cost} credits?`)) {
+        return;
+      }
+      
       if (item.id.startsWith('SABOTAGE_')) {
         try {
           const usersSnapshot = await getDocs(collection(db, 'users'));
@@ -994,27 +1193,23 @@ export default function App() {
             .filter(name => name !== currentUser?.name);
             
           if (activeUsers.length === 0) {
-            addFloatingText(window.innerWidth / 2, window.innerHeight / 2, "NO ACTIVE USERS TO SABOTAGE!", "text-red-500");
+            addFloatingText(window.innerWidth / 2, window.innerHeight / 2, "NO OTHER PLAYERS DETECTED!", "text-red-500");
             return; // Do not deduct points
           }
 
-          const target = activeUsers[Math.floor(Math.random() * activeUsers.length)];
-          const duration = Math.floor(Math.random() * 15000) + 15000; // 15 to 30 seconds
-          
-          await sendSabotage(target, item.type, duration);
-          addFloatingText(window.innerWidth / 2, window.innerHeight / 2, `SABOTAGE SENT TO ${target.toUpperCase()}!`, "text-red-600");
-          
-          // 60 second cooldown
-          setSabotageCooldowns(prev => ({ ...prev, [item.id]: Date.now() + 60000 }));
+          setSabotageTargetSelection({ item, activeUsers });
+          return; // Wait for user selection
         } catch (error) {
-          console.error("Failed to send sabotage:", error);
-          addFloatingText(window.innerWidth / 2, window.innerHeight / 2, "SABOTAGE FAILED!", "text-red-500");
+          console.error("Failed to fetch users for sabotage:", error);
+          addFloatingText(window.innerWidth / 2, window.innerHeight / 2, "FAILED TO FETCH PLAYERS!", "text-red-500");
           return;
         }
       }
 
       setTotalPoints(p => p - item.cost);
       playSound('POWERUP');
+      setShopFeedback({ message: `PURCHASED: ${item.name}`, type: 'success' });
+      setTimeout(() => setShopFeedback(null), 2000);
       
       if (item.id === 'HEALTH_KIT') {
         setHealth(h => {
@@ -1026,14 +1221,65 @@ export default function App() {
       if (item.id === 'SHIELD') setShieldCount(s => s + 3);
       if (item.id === 'SLOW_MO') {
         setIsSlowMo(true);
-        setTimeout(() => setIsSlowMo(false), 10000);
+        setPowerupTimers(prev => ({ ...prev, [item.id]: Date.now() + 10000 }));
+        setTimeout(() => {
+          setIsSlowMo(false);
+          setPowerupTimers(prev => {
+            const next = { ...prev };
+            delete next[item.id];
+            return next;
+          });
+        }, 10000);
       }
+      if (item.id === 'UPGRADE_SCORE') {
+        setUpgradeScoreMult(prev => prev + 0.5);
+        addFloatingText(window.innerWidth / 2, window.innerHeight / 2, "SCORE MULTIPLIER UPGRADED!", "text-orange-500");
+      }
+      if (item.id === 'UPGRADE_SPEED') {
+        setUpgradeSpeedReduce(prev => Math.max(0.4, prev - 0.15));
+        addFloatingText(window.innerWidth / 2, window.innerHeight / 2, "ENEMY SPEED REDUCED!", "text-blue-500");
+      }
+      if (item.id === 'AUTO_CLICKER') {
+        setHasAutoClicker(true);
+        addFloatingText(window.innerWidth / 2, window.innerHeight / 2, "AUTO-IMMUNITY ACTIVATED!", "text-green-500");
+      }
+    } else {
+      playSound('MISS');
+      setShopFeedback({ message: "NOT ENOUGH CREDITS!", type: 'error' });
+      setTimeout(() => setShopFeedback(null), 2000);
     }
   };
 
   // --- Boss Toxin Spawner ---
+  // Boss Attack Pattern Logic
   useEffect(() => {
     if (gameState !== 'PLAYING' || !bossActive || showExitConfirm) return;
+
+    let attackTimeout: NodeJS.Timeout;
+    let vulnerableTimeout: NodeJS.Timeout;
+
+    const startAttackPhase = () => {
+      setBossAttacking(true);
+      setBossPhaseEndTime(Date.now() + 5000);
+      attackTimeout = setTimeout(() => {
+        setBossAttacking(false);
+        const vulnerableDuration = 7000 + Math.random() * 3000;
+        setBossPhaseEndTime(Date.now() + vulnerableDuration);
+        vulnerableTimeout = setTimeout(startAttackPhase, vulnerableDuration); // 7-10 seconds vulnerable
+      }, 5000); // 5 seconds attacking
+    };
+
+    startAttackPhase();
+
+    return () => {
+      clearTimeout(attackTimeout);
+      clearTimeout(vulnerableTimeout);
+    };
+  }, [gameState, bossActive, showExitConfirm]);
+
+  // Boss Minion Spawning
+  useEffect(() => {
+    if (gameState !== 'PLAYING' || !bossActive || !bossAttacking || showExitConfirm) return;
 
     const interval = setInterval(() => {
       if (!gameAreaRef.current) return;
@@ -1076,7 +1322,45 @@ export default function App() {
     }, 800);
 
     return () => clearInterval(interval);
-  }, [gameState, bossActive]);
+  }, [gameState, bossActive, bossAttacking, showExitConfirm, isSpeedUp]);
+
+  // Sync score in multiplayer
+  useEffect(() => {
+    if (isMultiplayer && currentMatch && currentUser) {
+      updateMatchPlayer(currentMatch.id, currentUser.id, { score, health });
+      
+      const playersList = Object.values(currentMatch.players || {});
+      const myTeam = (playersList.find((p: any) => p.id === currentUser.id) as any)?.team;
+      const opponents = playersList.filter((p: any) => p.team !== myTeam);
+      
+      // Check if all opponents died
+      if (opponents.length > 0 && opponents.every((p: any) => p.health <= 0) && gameState === 'PLAYING') {
+        setGameState('GAME_FINISHED');
+        addFloatingText(window.innerWidth / 2, window.innerHeight / 2, "OPPONENTS ELIMINATED! YOU WIN!", "text-green-500");
+      }
+    }
+  }, [score, health, isMultiplayer, currentMatch, currentUser, gameState]);
+  const handleEntityClickRef = useRef(handleEntityClick);
+  useEffect(() => {
+    handleEntityClickRef.current = handleEntityClick;
+  });
+
+  useEffect(() => {
+    if (gameState !== 'PLAYING' || !hasAutoClicker || showExitConfirm) return;
+
+    const speed = activeEasterEgg?.powerup === 'MITO_POWER' ? 200 : 3000;
+    const interval = setInterval(() => {
+      setEntities(prev => {
+        const target = prev.find(e => e.type !== 'HEALTH_BOOST' && e.type !== 'TIME_DILATION' && e.type !== 'DETOX_BLAST' && e.type !== 'IMMUNITY' && e.type !== 'SCORE_FRENZY' && e.type !== 'EASTER_EGG' && e.type !== 'LAVA_BALL');
+        if (target) {
+          handleEntityClickRef.current(target.id, target.type, target.x, target.y);
+        }
+        return prev;
+      });
+    }, speed);
+
+    return () => clearInterval(interval);
+  }, [gameState, hasAutoClicker, showExitConfirm, activeEasterEgg?.powerup]);
 
   // Game Loop
   useEffect(() => {
@@ -1085,6 +1369,13 @@ export default function App() {
     const spawnInterval = setInterval(spawnEntity, spawnRate);
     
     const moveInterval = setInterval(() => {
+      setParticles(prev => prev.map(p => ({
+        ...p,
+        x: p.x + p.vx,
+        y: p.y + p.vy,
+        life: p.life - 0.05
+      })).filter(p => p.life > 0));
+
       setEntities(prev => {
         const now = Date.now();
         const updated = prev.map(e => {
@@ -1093,7 +1384,18 @@ export default function App() {
           let newX = e.x;
           let newY = e.y;
           
-          if (e.type === 'EASTER_EGG' && e.direction) {
+          if (e.type === 'BOSS') {
+            if (gameAreaRef.current) {
+              const rect = gameAreaRef.current.getBoundingClientRect();
+              // Faster and wider movement
+              newX = (rect.width / 2 - 100) + Math.sin(now / 800) * (rect.width / 2.5) + Math.cos(now / 400) * 50;
+              newY = 100 + Math.sin(now / 600) * 50 + Math.cos(now / 300) * 30;
+              
+              // Keep within bounds
+              newX = Math.max(0, Math.min(rect.width - 200, newX));
+              newY = Math.max(50, Math.min(rect.height / 2, newY));
+            }
+          } else if (e.type === 'EASTER_EGG' && e.direction) {
             newX += e.direction.x * e.speed;
             newY += e.direction.y * e.speed;
           } else {
@@ -1150,6 +1452,9 @@ export default function App() {
       if (health <= 0) {
         setGameState('GAME_OVER');
         updateLeaderboard(score);
+        if (isMultiplayer && currentMatch) {
+          updateMatchPlayer(currentMatch.id, currentUser!.id, { health: 0 });
+        }
       } else if (score >= targetScore && !bossActive) {
         if (currentLevel.hasBoss) {
           setGameState('BOSS_INTRO');
@@ -1158,9 +1463,124 @@ export default function App() {
         }
       }
     }
-  }, [health, score, targetScore, gameState, bossActive, currentLevel.hasBoss]);
+  }, [health, score, targetScore, gameState, bossActive, currentLevel.hasBoss, isMultiplayer, currentMatch?.id, currentUser?.id]);
 
   // --- UI Sections ---
+
+  const renderMultiplayerLobby = () => {
+    const handleCreateMatch = async (type: '1v1' | '2v2') => {
+      if (!currentUser) return;
+      playSound('CLICK');
+      const matchId = await createMatch(type, currentUser.id, currentUser.name);
+      if (matchId) {
+        setIsMultiplayer(true);
+        listenToMatch(matchId, (match) => {
+          setCurrentMatch(match);
+          if (match?.status === 'PLAYING') {
+            startGame('MEDIUM'); // Default difficulty for multiplayer
+          }
+        });
+      }
+    };
+
+    const handleJoinMatch = async () => {
+      if (!currentUser || !joinCode) return;
+      playSound('CLICK');
+      const success = await joinMatch(joinCode, currentUser.id, currentUser.name);
+      if (success) {
+        setIsMultiplayer(true);
+        listenToMatch(joinCode, (match) => {
+          setCurrentMatch(match);
+          if (match?.status === 'PLAYING') {
+            startGame('MEDIUM');
+          }
+        });
+      } else {
+        alert("Failed to join match. Check the code or if the match is full.");
+      }
+    };
+
+    return (
+      <motion.div 
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        className="flex flex-col items-center justify-center p-6 md:p-12 flex-1 py-12"
+      >
+        <button 
+          onClick={() => { playSound('CLICK'); setGameState('START'); }}
+          className="absolute top-6 left-6 p-2 text-slate-400 hover:text-slate-900 transition-colors"
+        >
+          <X className="w-8 h-8" />
+        </button>
+
+        <h2 className="text-4xl md:text-5xl font-black uppercase mb-8 text-slate-900">Multiplayer</h2>
+
+        {!currentMatch ? (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-8 w-full max-w-4xl">
+            <div className="border-4 border-slate-900 p-8 flex flex-col gap-4 neo-brutalist-shadow">
+              <h3 className="text-2xl font-black uppercase text-slate-900">Create Match</h3>
+              <button 
+                onClick={() => handleCreateMatch('1v1')}
+                className="bg-blue-500 text-white px-6 py-4 font-bold uppercase tracking-widest hover:bg-blue-600 transition-colors border-2 border-slate-900"
+              >
+                Create 1v1
+              </button>
+              <button 
+                onClick={() => handleCreateMatch('2v2')}
+                className="bg-green-500 text-white px-6 py-4 font-bold uppercase tracking-widest hover:bg-green-600 transition-colors border-2 border-slate-900"
+              >
+                Create 2v2
+              </button>
+            </div>
+
+            <div className="border-4 border-slate-900 p-8 flex flex-col gap-4 neo-brutalist-shadow">
+              <h3 className="text-2xl font-black uppercase text-slate-900">Join Match</h3>
+              <input 
+                type="text" 
+                placeholder="Enter Match Code" 
+                value={joinCode}
+                onChange={(e) => setJoinCode(e.target.value)}
+                className="border-2 border-slate-900 p-4 font-mono text-lg"
+              />
+              <button 
+                onClick={handleJoinMatch}
+                className="bg-yellow-400 text-slate-900 px-6 py-4 font-bold uppercase tracking-widest hover:bg-yellow-500 transition-colors border-2 border-slate-900"
+              >
+                Join
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="border-4 border-slate-900 p-8 flex flex-col items-center gap-6 neo-brutalist-shadow max-w-2xl w-full">
+            <h3 className="text-3xl font-black uppercase text-slate-900">Lobby: {currentMatch.type}</h3>
+            <div className="bg-slate-100 p-4 border-2 border-slate-900 w-full text-center">
+              <p className="text-sm font-bold text-slate-500 uppercase mb-2">Match Code (Share this to invite)</p>
+              <p className="text-2xl font-mono tracking-widest text-slate-900">{currentMatch.id}</p>
+            </div>
+
+            <div className="w-full grid grid-cols-2 gap-4">
+              <div className="border-2 border-blue-500 p-4">
+                <h4 className="font-black text-blue-500 uppercase mb-2">Team A</h4>
+                {Object.values(currentMatch.players || {}).filter((p: any) => p.team === 'A').map((p: any) => (
+                  <div key={p.id} className="font-bold">{p.name}</div>
+                ))}
+              </div>
+              <div className="border-2 border-red-500 p-4">
+                <h4 className="font-black text-red-500 uppercase mb-2">Team B</h4>
+                {Object.values(currentMatch.players || {}).filter((p: any) => p.team === 'B').map((p: any) => (
+                  <div key={p.id} className="font-bold">{p.name}</div>
+                ))}
+              </div>
+            </div>
+
+            <p className="text-slate-500 font-bold animate-pulse mt-4">
+              {currentMatch.status === 'WAITING' ? 'Waiting for players...' : 'Starting match...'}
+            </p>
+          </div>
+        )}
+      </motion.div>
+    );
+  };
 
   const renderStartScreen = () => (
     <motion.div 
@@ -1179,33 +1599,45 @@ export default function App() {
       
       <div className="grid grid-cols-1 gap-4 w-full max-w-xs">
         <button 
-          onClick={() => setGameState('TUTORIAL')}
+          onClick={() => { playSound('CLICK'); setGameState('TUTORIAL'); }}
           className="bg-slate-900 text-white px-8 py-4 rounded-none text-lg md:text-xl font-bold hover:bg-slate-800 transition-all uppercase tracking-widest neo-brutalist-shadow"
         >
           Start Tutorial
         </button>
         <button 
-          onClick={() => setGameState('DIFFICULTY')}
+          onClick={() => { playSound('CLICK'); setGameState('DIFFICULTY'); }}
           className="border-4 border-slate-900 text-slate-900 px-8 py-4 rounded-none text-lg md:text-xl font-bold hover:bg-slate-50 transition-all uppercase tracking-widest neo-brutalist-shadow"
         >
           Play Game
         </button>
         <button 
-          onClick={() => setGameState('LEADERBOARD')}
+          onClick={() => { playSound('CLICK'); setGameState('MULTIPLAYER_LOBBY'); }}
+          className="bg-blue-500 text-white border-4 border-slate-900 px-8 py-4 rounded-none text-lg md:text-xl font-bold hover:bg-blue-600 transition-all uppercase tracking-widest neo-brutalist-shadow"
+        >
+          Multiplayer
+        </button>
+        <button 
+          onClick={() => { playSound('CLICK'); setGameState('LEADERBOARD'); }}
           className="bg-yellow-400 text-slate-900 border-4 border-slate-900 px-8 py-4 rounded-none text-lg md:text-xl font-bold hover:bg-yellow-300 transition-all uppercase tracking-widest neo-brutalist-shadow flex items-center justify-center gap-2"
         >
           <Trophy className="w-6 h-6" /> Leaderboard
         </button>
         <button 
-          onClick={() => setGameState('SHOP')}
+          onClick={() => { playSound('CLICK'); setGameState('SHOP'); }}
           className="flex items-center justify-center gap-2 border-4 border-slate-900 text-slate-900 px-8 py-4 rounded-none text-lg md:text-xl font-bold hover:bg-slate-50 transition-all uppercase tracking-widest neo-brutalist-shadow"
         >
           <ShoppingCart /> Shop ({totalPoints})
         </button>
+        <button 
+          onClick={() => { playSound('CLICK'); handleLogout(); }}
+          className="flex items-center justify-center gap-2 border-4 border-slate-900 text-slate-900 px-8 py-4 rounded-none text-lg md:text-xl font-bold hover:bg-red-50 hover:text-red-600 hover:border-red-600 transition-all uppercase tracking-widest neo-brutalist-shadow mt-4"
+        >
+          <LogOut className="w-5 h-5" /> Log Out
+        </button>
         
         <div className="flex gap-2 mt-4">
           <button 
-            onClick={startBossDev}
+            onClick={() => { playSound('CLICK'); startBossDev(); }}
             className="flex-1 py-2 bg-red-100 text-red-600 font-black uppercase text-[10px] border-2 border-red-600 hover:bg-red-200 transition-all"
           >
             Skip to Boss
@@ -1235,7 +1667,9 @@ export default function App() {
                     direction: { x: side === 'left' ? 1 : -1, y: 0 },
                     easterEggData: {
                       message: msg,
-                      powerup: msg.includes('grade') ? 'GRADE_BOOST' : 'SCORE_FRENZY'
+                      powerup: msg.includes('grade') ? 'GRADE_BOOST' : 'SCORE_FRENZY',
+                      description: msg,
+                      duration: 5
                     }
                   };
                   setEntities(prev => [...prev, newEgg]);
@@ -1266,6 +1700,10 @@ export default function App() {
               {isScoreFrenzy && <Flame className="text-orange-500 w-6 h-6 md:w-8 md:h-8 animate-pulse" />}
               {isSlowMo && <Clock className="text-purple-500 w-6 h-6 md:w-8 md:h-8 animate-pulse" />}
               {gradeBoostActive && <Zap className="text-yellow-400 w-6 h-6 md:w-8 md:h-8 animate-pulse" />}
+              {Object.entries(powerupTimers).map(([id, endTime]) => {
+                const item = SHOP_ITEMS.find(i => i.id === id);
+                return item ? <PowerupTimer key={id} name={item.name} endTime={endTime as number} icon={item.icon} /> : null;
+              })}
             </div>
           </div>
           {/* Multiplier Visualizer */}
@@ -1284,13 +1722,13 @@ export default function App() {
         {/* Combo Visualizer */}
         <div className="absolute left-1/2 -translate-x-1/2 -bottom-6 z-30">
           <motion.div 
-            animate={combos > 5 ? { scale: [1, 1.1, 1], rotate: [-2, 2, -2] } : {}}
-            transition={{ duration: 0.5, repeat: Infinity }}
-            className={`px-6 py-2 border-4 border-slate-900 font-black text-xl md:text-2xl flex items-center gap-2 transition-all ${combos > 5 ? 'bg-slate-900 text-white shadow-[4px_4px_0px_0px_rgba(239,68,68,1)]' : 'bg-white text-slate-900'}`}
+            animate={combos > 5 ? { scale: [1, 1.2, 1], rotate: [-5, 5, -5] } : {}}
+            transition={{ duration: 0.3, repeat: Infinity }}
+            className={`px-6 py-2 border-4 border-slate-900 font-black text-xl md:text-2xl flex items-center gap-2 transition-all ${combos > 10 ? 'bg-red-600 text-white shadow-[6px_6px_0px_0px_rgba(15,23,42,1)] scale-110' : combos > 5 ? 'bg-slate-900 text-white shadow-[4px_4px_0px_0px_rgba(239,68,68,1)]' : 'bg-white text-slate-900'}`}
           >
             <div className="flex items-center gap-2">
-              <Flame className={`w-6 h-6 ${combos > 5 ? 'text-yellow-400 animate-pulse' : 'text-slate-400'}`} />
-              <span className={combos > 5 ? 'text-transparent bg-clip-text bg-gradient-to-r from-yellow-400 via-red-500 to-purple-500' : ''}>{combos}</span>
+              <Flame className={`w-6 h-6 ${combos > 10 ? 'text-yellow-300 animate-bounce' : combos > 5 ? 'text-yellow-400 animate-pulse' : 'text-slate-400'}`} />
+              <span className={combos > 10 ? 'text-yellow-300 drop-shadow-[0_0_8px_rgba(253,224,71,0.8)]' : combos > 5 ? 'text-transparent bg-clip-text bg-gradient-to-r from-yellow-400 via-red-500 to-purple-500' : ''}>{combos}</span>
             </div>
             <div className="text-xs font-black">COMBO</div>
           </motion.div>
@@ -1302,6 +1740,18 @@ export default function App() {
         </div>
 
         <div className="flex items-center gap-4 md:gap-6">
+          {isMultiplayer && currentMatch && (
+            <div className="flex flex-col items-end mr-4 border-r-4 border-slate-900 pr-4">
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Opponent Team</span>
+              </div>
+              <span className="text-xl md:text-2xl font-black tabular-nums text-red-500">
+                {Object.values(currentMatch.players || {})
+                  .filter((p: any) => p.team !== (Object.values(currentMatch.players || {}).find((me: any) => me.id === currentUser?.id) as any)?.team)
+                  .reduce((sum: number, p: any) => sum + p.score, 0)}
+              </span>
+            </div>
+          )}
           <div className="flex flex-col items-end">
             <div className="flex items-center gap-2">
               <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Points</span>
@@ -1309,7 +1759,10 @@ export default function App() {
             <span className="text-2xl md:text-3xl font-black tabular-nums">{score}</span>
           </div>
           <button 
-            onClick={() => setShowExitConfirm(true)}
+            onClick={() => {
+              setPendingGameState('START');
+              setShowExitConfirm(true);
+            }}
             className="p-2 border-4 border-slate-900 hover:bg-red-50 hover:text-red-600 transition-colors neo-brutalist-shadow"
             title="Exit Sector"
           >
@@ -1318,6 +1771,32 @@ export default function App() {
         </div>
       </div>
 
+      {/* Boss Health Bar */}
+      {bossActive && (
+        <motion.div 
+          initial={{ y: -50, opacity: 0 }}
+          animate={{ y: 0, opacity: 1 }}
+          className="w-full bg-slate-900 p-2 z-20 relative border-b-4 border-red-900"
+        >
+          <div className="max-w-3xl mx-auto">
+            <div className="flex justify-between items-center mb-1">
+              <span className="text-red-500 font-black uppercase text-xs tracking-widest animate-pulse">Warning: Alpha Threat Detected</span>
+              <span className="text-red-500 font-black text-xs">
+                {entities.find(e => e.type === 'BOSS')?.health || 0} / {entities.find(e => e.type === 'BOSS')?.maxHealth || 1}
+              </span>
+            </div>
+            <div className="w-full h-4 bg-slate-800 border-2 border-slate-950 relative overflow-hidden">
+              <motion.div 
+                className="absolute top-0 left-0 h-full bg-gradient-to-r from-red-600 to-red-400"
+                animate={{ width: `${((entities.find(e => e.type === 'BOSS')?.health || 0) / (entities.find(e => e.type === 'BOSS')?.maxHealth || 1)) * 100}%` }}
+                transition={{ duration: 0.2 }}
+              />
+            </div>
+            <BossTimer endTime={bossPhaseEndTime} isAttacking={bossAttacking} />
+          </div>
+        </motion.div>
+      )}
+
       {/* Game Stage */}
       <motion.div 
         ref={gameAreaRef}
@@ -1325,8 +1804,14 @@ export default function App() {
         className="flex-1 relative overflow-hidden bg-slate-50 cursor-crosshair min-h-[500px] game-canvas"
         onClick={(e) => {
           if (e.target === e.currentTarget) {
+            if (combos > 5) {
+               addFloatingText(e.clientX, e.clientY, "COMBO BROKEN!", "text-red-600");
+               triggerScreenShake();
+               playSound('COMBO_BREAK');
+            } else {
+               playSound('MISS');
+            }
             setCombos(0);
-            playSound('MISS');
           }
         }}
       >
@@ -1397,9 +1882,10 @@ export default function App() {
           {entities.map(entity => (
             <motion.div
               key={entity.id}
-              initial={{ scale: 0, opacity: 0, rotate: entity.rotation - 45 }}
-              animate={{ scale: 1, opacity: 1, rotate: entity.rotation }}
+              initial={{ scale: 0, opacity: 0, y: -20, rotate: entity.rotation - 45 }}
+              animate={{ scale: 1, opacity: 1, y: 0, rotate: entity.rotation }}
               exit={{ scale: 1.5, opacity: 0, transition: { duration: 0.1 } }}
+              transition={{ type: 'spring', stiffness: 300, damping: 15 }}
               style={{ 
                 position: 'absolute', 
                 left: entity.x, 
@@ -1410,10 +1896,30 @@ export default function App() {
               onPointerDown={(e) => handleEntityClick(entity.id, entity.type, e.clientX, e.clientY)}
               className="cursor-pointer neo-brutalist-shadow"
             >
-              <EntityVisual type={entity.type} health={entity.health} maxHealth={entity.maxHealth} isMutated={entity.isMutated} />
+              <EntityVisual type={entity.type} health={entity.health} maxHealth={entity.maxHealth} isMutated={entity.isMutated} isAttacking={entity.type === 'BOSS' ? bossAttacking : false} />
             </motion.div>
           ))}
         </AnimatePresence>
+
+        {/* Particles */}
+        {particles.map(p => (
+          <div
+            key={p.id}
+            style={{
+              position: 'absolute',
+              left: p.x,
+              top: p.y,
+              width: '8px',
+              height: '8px',
+              backgroundColor: p.color,
+              opacity: p.life,
+              borderRadius: '50%',
+              pointerEvents: 'none',
+              transform: 'translate(-50%, -50%)',
+              zIndex: 40
+            }}
+          />
+        ))}
 
         {/* Floating Texts */}
         <AnimatePresence>
@@ -1519,19 +2025,85 @@ export default function App() {
       {/* Footer Controls */}
       <div className="p-4 border-t-8 border-slate-900 flex justify-between items-center bg-slate-50">
         <div className="flex gap-2">
-          <button onClick={() => setGameState('SHOP')} className="p-2 border-4 border-slate-900 hover:bg-slate-200"><ShoppingCart /></button>
-          <button onClick={() => setGameState('INFO')} className="p-2 border-4 border-slate-900 hover:bg-slate-200"><Info /></button>
+          <button onClick={() => { setPreviousGameState(gameState); setGameState('INFO'); }} className="p-2 border-4 border-slate-900 hover:bg-slate-200"><Info /></button>
+          <button onClick={() => { setPreviousGameState(gameState); setGameState('SHOP'); }} className="p-2 border-4 border-slate-900 hover:bg-slate-200"><ShoppingCart /></button>
         </div>
         <div className="font-black uppercase tracking-widest text-slate-400">Total: {totalPoints} pts</div>
       </div>
     </div>
   );
 
+  const confirmSabotage = async (target: string) => {
+    if (!sabotageTargetSelection) return;
+    const { item } = sabotageTargetSelection;
+    
+    try {
+      const duration = Math.floor(Math.random() * 15000) + 15000; // 15 to 30 seconds
+      await sendSabotage(target, item.type, duration);
+      addFloatingText(window.innerWidth / 2, window.innerHeight / 2, `SABOTAGE SENT TO ${target.toUpperCase()}!`, "text-red-600");
+      
+      // 60 second cooldown
+      setSabotageCooldowns(prev => ({ ...prev, [item.id]: Date.now() + 60000 }));
+      
+      setTotalPoints(p => p - item.cost);
+      playSound('POWERUP');
+      setShopFeedback({ message: `PURCHASED: ${item.name}`, type: 'success' });
+      setTimeout(() => setShopFeedback(null), 2000);
+    } catch (error) {
+      console.error("Failed to send sabotage:", error);
+      addFloatingText(window.innerWidth / 2, window.innerHeight / 2, "SABOTAGE FAILED!", "text-red-500");
+    } finally {
+      setSabotageTargetSelection(null);
+    }
+  };
+
   const renderShop = () => (
-    <div className="absolute inset-0 bg-white z-50 p-6 md:p-12 flex flex-col">
-      <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 md:mb-12 gap-4">
+    <div className="absolute inset-0 bg-slate-50 z-50 p-6 md:p-12 flex flex-col overflow-hidden">
+      {/* Background Pattern */}
+      <div className="absolute inset-0 opacity-5 pointer-events-none" style={{ backgroundImage: 'radial-gradient(#000 2px, transparent 2px)', backgroundSize: '32px 32px' }}></div>
+      
+      {sabotageTargetSelection && (
+        <div className="fixed inset-0 bg-slate-900/80 z-[100] flex items-center justify-center p-6">
+          <div className="bg-white border-4 border-slate-900 p-8 w-full max-w-md neo-brutalist-shadow flex flex-col max-h-[80vh]">
+            <h3 className="text-2xl font-black uppercase mb-4 text-red-600 border-b-4 border-slate-900 pb-2">Select Target</h3>
+            <p className="text-slate-600 font-bold mb-4">Who do you want to sabotage with {sabotageTargetSelection.item.name}?</p>
+            <div className="flex-1 overflow-y-auto custom-scrollbar pr-2 space-y-2">
+              {sabotageTargetSelection.activeUsers.map(user => (
+                <button
+                  key={user}
+                  onClick={() => confirmSabotage(user)}
+                  className="w-full text-left p-4 border-2 border-slate-900 font-black text-lg hover:bg-red-50 hover:text-red-600 transition-colors"
+                >
+                  {user}
+                </button>
+              ))}
+            </div>
+            <button
+              onClick={() => setSabotageTargetSelection(null)}
+              className="mt-6 bg-slate-200 text-slate-900 px-6 py-4 font-black uppercase tracking-widest hover:bg-slate-300 transition-colors border-2 border-slate-900"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      <AnimatePresence>
+        {shopFeedback && (
+          <motion.div 
+            initial={{ opacity: 0, y: -50 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -50 }}
+            className={`absolute top-4 left-1/2 -translate-x-1/2 z-[100] px-8 py-4 font-black text-xl md:text-2xl uppercase tracking-widest border-4 border-white neo-brutalist-shadow text-white ${shopFeedback.type === 'success' ? 'bg-green-500' : 'bg-red-600'}`}
+          >
+            {shopFeedback.message}
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <div className="relative flex flex-col md:flex-row justify-between items-start md:items-center mb-8 md:mb-12 gap-4">
         <div className="flex items-center gap-4">
-          <button onClick={() => setGameState('START')} className="p-2 md:p-3 border-4 border-slate-900 hover:bg-slate-100 transition-colors neo-brutalist-shadow">
+          <button onClick={() => setGameState(previousGameState || 'START')} className="p-2 md:p-3 border-4 border-slate-900 hover:bg-slate-100 transition-colors neo-brutalist-shadow">
             <ArrowLeft className="w-6 h-6 md:w-8 md:h-8" />
           </button>
           <h2 className="text-4xl md:text-6xl font-black tracking-tighter uppercase">Metabolic Shop</h2>
@@ -1546,33 +2118,38 @@ export default function App() {
         <div className="mb-4">
           <h3 className="text-sm font-black uppercase tracking-widest text-slate-500 mb-6 border-b-4 border-slate-200 pb-2 flex items-center gap-2"><Shield className="w-5 h-5" /> Defensive Upgrades</h3>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
-            {SHOP_ITEMS.map(item => {
+            {SHOP_ITEMS.map((item, index) => {
               const isOnCooldown = item.id.startsWith('SABOTAGE_') && sabotageCooldowns[item.id] && Date.now() < sabotageCooldowns[item.id];
               const cooldownRemaining = isOnCooldown ? Math.ceil((sabotageCooldowns[item.id] - Date.now()) / 1000) : 0;
               
               return (
-              <button 
+              <motion.button 
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: index * 0.1 }}
                 key={item.id}
                 onClick={() => buyItem(item)}
                 disabled={totalPoints < item.cost || isOnCooldown}
-                className={`group flex items-center gap-4 md:gap-6 p-4 md:p-6 border-4 border-slate-900 text-left transition-all relative ${(totalPoints >= item.cost && !isOnCooldown) ? 'bg-white hover:bg-slate-50 neo-brutalist-shadow hover:-translate-y-1' : 'bg-slate-100 opacity-40 grayscale cursor-not-allowed'}`}
+                className={`group flex flex-col p-4 md:p-6 border-4 border-slate-900 text-left transition-all relative ${(totalPoints >= item.cost && !isOnCooldown) ? 'bg-white hover:bg-slate-50 neo-brutalist-shadow hover:-translate-y-1' : 'bg-slate-100 opacity-40 grayscale cursor-not-allowed'}`}
               >
-                <div className="p-3 md:p-4 border-4 border-slate-900 bg-white group-hover:scale-110 transition-transform shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">{item.icon}</div>
-                <div className="flex-1">
+                <div className="flex justify-between items-start w-full mb-4">
+                  <div className="p-3 md:p-4 border-4 border-slate-900 bg-white group-hover:scale-110 transition-transform shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">{item.icon}</div>
+                  <div className="flex flex-col items-end bg-slate-900 text-white px-3 py-1 border-2 border-slate-900 shadow-[4px_4px_0px_0px_rgba(0,0,0,0.2)]">
+                    {isOnCooldown ? (
+                      <div className="text-xl md:text-2xl font-black text-red-500">{cooldownRemaining}s</div>
+                    ) : (
+                      <>
+                        <div className="text-xl md:text-3xl font-black tabular-nums">{item.cost}</div>
+                        <div className="text-[10px] font-black uppercase text-slate-300">Credits</div>
+                      </>
+                    )}
+                  </div>
+                </div>
+                <div className="flex-1 w-full">
                   <h3 className="text-lg md:text-2xl font-black uppercase tracking-tight">{item.name}</h3>
-                  <p className="text-slate-500 font-bold text-xs md:text-sm line-clamp-2">{item.description}</p>
+                  <p className="text-slate-500 font-bold text-xs md:text-sm mt-2">{item.description}</p>
                 </div>
-                <div className="flex flex-col items-end">
-                  {isOnCooldown ? (
-                    <div className="text-xl md:text-2xl font-black text-red-500">{cooldownRemaining}s</div>
-                  ) : (
-                    <>
-                      <div className="text-xl md:text-3xl font-black tabular-nums">{item.cost}</div>
-                      <div className="text-[10px] font-black uppercase text-slate-400">Credits</div>
-                    </>
-                  )}
-                </div>
-              </button>
+              </motion.button>
             )})}
           </div>
         </div>
@@ -1580,41 +2157,46 @@ export default function App() {
         <div className="mt-8">
           <h3 className="text-sm font-black uppercase tracking-widest text-red-500 mb-6 border-b-4 border-red-100 pb-2 flex items-center gap-2"><Zap className="w-5 h-5" /> Class Sabotage (Multiplayer)</h3>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 md:gap-6">
-            {SABOTAGE_ITEMS.map(item => {
+            {SABOTAGE_ITEMS.map((item, index) => {
               const isOnCooldown = item.id.startsWith('SABOTAGE_') && sabotageCooldowns[item.id] && Date.now() < sabotageCooldowns[item.id];
               const cooldownRemaining = isOnCooldown ? Math.ceil((sabotageCooldowns[item.id] - Date.now()) / 1000) : 0;
               
               return (
-              <button 
+              <motion.button 
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: index * 0.1 }}
                 key={item.id}
                 onClick={() => buyItem(item)}
                 disabled={totalPoints < item.cost || isOnCooldown}
-                className={`group flex items-center gap-4 md:gap-6 p-4 md:p-6 border-4 border-red-600 text-left transition-all relative ${(totalPoints >= item.cost && !isOnCooldown) ? 'bg-white hover:bg-red-50 neo-brutalist-shadow hover:-translate-y-1' : 'bg-slate-100 opacity-40 grayscale cursor-not-allowed'}`}
+                className={`group flex flex-col p-4 md:p-6 border-4 border-red-600 text-left transition-all relative ${(totalPoints >= item.cost && !isOnCooldown) ? 'bg-white hover:bg-red-50 neo-brutalist-shadow hover:-translate-y-1' : 'bg-slate-100 opacity-40 grayscale cursor-not-allowed'}`}
               >
-                <div className="p-3 md:p-4 border-4 border-red-600 bg-white group-hover:scale-110 transition-transform shadow-[4px_4px_0px_0px_rgba(239,68,68,1)]">{item.icon}</div>
-                <div className="flex-1">
+                <div className="flex justify-between items-start w-full mb-4">
+                  <div className="p-3 md:p-4 border-4 border-red-600 bg-white group-hover:scale-110 transition-transform shadow-[4px_4px_0px_0px_rgba(239,68,68,1)]">{item.icon}</div>
+                  <div className="flex flex-col items-end bg-red-600 text-white px-3 py-1 border-2 border-red-600 shadow-[4px_4px_0px_0px_rgba(239,68,68,0.2)]">
+                    {isOnCooldown ? (
+                      <div className="text-xl md:text-2xl font-black text-white">{cooldownRemaining}s</div>
+                    ) : (
+                      <>
+                        <div className="text-xl md:text-3xl font-black tabular-nums">{item.cost}</div>
+                        <div className="text-[10px] font-black uppercase text-red-200">Credits</div>
+                      </>
+                    )}
+                  </div>
+                </div>
+                <div className="flex-1 w-full">
                   <h3 className="text-lg md:text-xl font-black uppercase tracking-tight text-red-600">{item.name}</h3>
-                  <p className="text-slate-500 font-bold text-xs md:text-sm line-clamp-2">{item.description}</p>
+                  <p className="text-slate-500 font-bold text-xs md:text-sm mt-2">{item.description}</p>
                 </div>
-                <div className="flex flex-col items-end">
-                  {isOnCooldown ? (
-                    <div className="text-xl md:text-2xl font-black text-red-500">{cooldownRemaining}s</div>
-                  ) : (
-                    <>
-                      <div className="text-xl md:text-3xl font-black tabular-nums text-red-600">{item.cost}</div>
-                      <div className="text-[10px] font-black uppercase text-red-400">Credits</div>
-                    </>
-                  )}
-                </div>
-              </button>
+              </motion.button>
             )})}
           </div>
         </div>
       </div>
 
       <button 
-        onClick={() => setGameState(gameState === 'SHOP' ? 'START' : 'PLAYING')}
-        className="mt-8 md:mt-12 bg-slate-900 text-white py-6 md:py-8 font-black text-xl md:text-3xl uppercase tracking-[0.2em] hover:bg-slate-800 transition-colors neo-brutalist-shadow border-4 border-white"
+        onClick={() => setGameState(previousGameState || 'START')}
+        className="relative mt-8 md:mt-12 bg-slate-900 text-white py-6 md:py-8 font-black text-xl md:text-3xl uppercase tracking-[0.2em] hover:bg-slate-800 transition-all hover:-translate-y-1 neo-brutalist-shadow border-4 border-white z-10"
       >
         Return to Mission
       </button>
@@ -1718,6 +2300,7 @@ export default function App() {
         transition={{ type: 'spring', delay: 0.6 }}
         onClick={() => {
           setGameState('PLAYING');
+          setBossActive(true);
           setTimeout(spawnBoss, 100);
         }}
         className="relative z-10 group bg-red-600 text-white px-12 py-5 md:px-16 md:py-6 text-2xl md:text-4xl font-black uppercase tracking-[0.2em] rounded-full shadow-[0_0_40px_rgba(220,38,38,0.5)] hover:shadow-[0_0_80px_rgba(220,38,38,0.8)] hover:bg-red-500 transition-all overflow-hidden"
@@ -1796,6 +2379,7 @@ export default function App() {
           </div>
         )}
         {gameState === 'START' && renderStartScreen()}
+        {gameState === 'MULTIPLAYER_LOBBY' && renderMultiplayerLobby()}
         {gameState === 'DIFFICULTY' && (
           <div className="flex flex-col items-center justify-center p-6 md:p-12 flex-1 py-12">
             <h2 className="text-3xl md:text-4xl font-black uppercase mb-12">Select Intensity</h2>
@@ -1816,7 +2400,10 @@ export default function App() {
             className="fixed inset-0 bg-slate-950 z-50 flex overflow-y-auto py-12 px-6 md:px-12 custom-scrollbar"
           >
             <button 
-              onClick={() => setShowExitConfirm(true)}
+              onClick={() => {
+                setPendingGameState('START');
+                setShowExitConfirm(true);
+              }}
               className="absolute top-6 right-6 md:top-8 md:right-8 p-2 text-slate-400 hover:text-white transition-colors z-50"
               title="Exit Sector"
             >
@@ -1849,14 +2436,26 @@ export default function App() {
                 </div>
               </div>
 
-              <button 
-                onClick={() => setGameState('PLAYING')}
-                className="group relative bg-blue-600 text-white px-12 py-4 md:px-16 md:py-5 text-xl md:text-2xl font-black uppercase tracking-[0.2em] rounded-full shadow-[0_0_40px_rgba(37,99,235,0.4)] hover:shadow-[0_0_60px_rgba(37,99,235,0.6)] hover:bg-blue-500 transition-all mb-12 overflow-hidden"
-              >
-                <span className="relative z-10 flex items-center gap-3">
-                  Initialize Protocol <ArrowRight className="w-6 h-6 group-hover:translate-x-2 transition-transform" />
-                </span>
-              </button>
+              <div className="flex flex-col md:flex-row gap-4 mb-12">
+                <button 
+                  onClick={() => setGameState('PLAYING')}
+                  className="group relative bg-blue-600 text-white px-8 py-4 md:px-12 md:py-5 text-lg md:text-xl font-black uppercase tracking-[0.2em] rounded-full shadow-[0_0_40px_rgba(37,99,235,0.4)] hover:shadow-[0_0_60px_rgba(37,99,235,0.6)] hover:bg-blue-500 transition-all overflow-hidden"
+                >
+                  <span className="relative z-10 flex items-center gap-3">
+                    Initialize Protocol <ArrowRight className="w-6 h-6 group-hover:translate-x-2 transition-transform" />
+                  </span>
+                </button>
+                
+                <button 
+                  onClick={skipLevel}
+                  disabled={totalPoints < 150}
+                  className={`group relative px-8 py-4 md:px-12 md:py-5 text-lg md:text-xl font-black uppercase tracking-[0.2em] rounded-full transition-all overflow-hidden border-2 ${totalPoints >= 150 ? 'bg-slate-800 text-yellow-400 border-yellow-400/50 hover:bg-slate-700 hover:border-yellow-400' : 'bg-slate-900 text-slate-600 border-slate-800 cursor-not-allowed'}`}
+                >
+                  <span className="relative z-10 flex items-center gap-3">
+                    Skip Sector (150 pts) <FastForward className="w-6 h-6" />
+                  </span>
+                </button>
+              </div>
             </div>
           </motion.div>
         )}
@@ -1865,6 +2464,20 @@ export default function App() {
             <Trophy className="w-32 h-32 text-yellow-500 mb-8" />
             <h2 className="text-6xl font-black uppercase mb-4">Mission Success</h2>
             
+            {isMultiplayer && currentMatch && (
+              <div className="mb-8 p-6 border-4 border-slate-900 bg-white neo-brutalist-shadow w-full max-w-md">
+                <h3 className="text-2xl font-black uppercase mb-4">Match Results</h3>
+                {Object.values(currentMatch.players || {}).map((p: any) => (
+                  <div key={p.id} className="flex justify-between font-bold text-lg border-b-2 border-slate-100 py-2">
+                    <span>{p.name}</span>
+                    <span className={p.health <= 0 ? 'text-red-500' : 'text-green-500'}>
+                      {p.health <= 0 ? 'ELIMINATED' : `SCORE: ${p.score}`}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+
             <div className="bg-slate-50 border-4 border-slate-900 p-6 mb-8 w-full max-w-sm">
               <div className="flex justify-between items-center mb-2">
                 <span className="font-black uppercase text-slate-400">Health Bonus</span>
@@ -1878,11 +2491,17 @@ export default function App() {
             <button 
               onClick={() => {
                 setTotalPoints(p => p + (health * 5));
-                nextLevel();
+                if (isMultiplayer) {
+                  setIsMultiplayer(false);
+                  setCurrentMatch(null);
+                  setGameState('START');
+                } else {
+                  nextLevel();
+                }
               }} 
               className="bg-slate-900 text-white px-12 py-6 text-2xl font-black uppercase tracking-widest neo-brutalist-shadow"
             >
-              Next Sector
+              {isMultiplayer ? 'Return to Menu' : 'Next Sector'}
             </button>
           </div>
         )}
@@ -1891,8 +2510,23 @@ export default function App() {
             <AlertCircle className="w-32 h-32 text-red-600 mb-8" />
             <h2 className="text-6xl font-black uppercase text-red-600 mb-4 tracking-tighter">System Failure</h2>
             <p className="text-xl text-red-500 font-black uppercase mb-8">Liver Integrity Compromised</p>
+            
+            {isMultiplayer && currentMatch && (
+              <div className="mb-8 p-6 border-4 border-slate-900 bg-white neo-brutalist-shadow w-full max-w-md">
+                <h3 className="text-2xl font-black uppercase mb-4">Match Results</h3>
+                {Object.values(currentMatch.players || {}).map((p: any) => (
+                  <div key={p.id} className="flex justify-between font-bold text-lg border-b-2 border-slate-100 py-2">
+                    <span>{p.name}</span>
+                    <span className={p.health <= 0 ? 'text-red-500' : 'text-green-500'}>
+                      {p.health <= 0 ? 'ELIMINATED' : `SCORE: ${p.score}`}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+
             <div className="flex gap-4">
-              <button onClick={() => setGameState('START')} className="bg-slate-900 text-white px-12 py-6 text-2xl font-black uppercase tracking-widest neo-brutalist-shadow hover:bg-slate-800 transition-colors">Reboot</button>
+              <button onClick={() => { setIsMultiplayer(false); setCurrentMatch(null); setGameState('START'); }} className="bg-slate-900 text-white px-12 py-6 text-2xl font-black uppercase tracking-widest neo-brutalist-shadow hover:bg-slate-800 transition-colors">Reboot</button>
               <button onClick={() => setGameState('LEADERBOARD')} className="bg-white text-slate-900 border-4 border-slate-900 px-12 py-6 text-2xl font-black uppercase tracking-widest neo-brutalist-shadow hover:bg-slate-50 transition-colors">Records</button>
             </div>
           </div>
@@ -1902,7 +2536,7 @@ export default function App() {
           <div className="absolute inset-0 bg-white z-50 p-6 md:p-12 flex flex-col items-center justify-center text-center overflow-y-auto custom-scrollbar">
             <div className="max-w-2xl w-full">
               <div className="flex justify-center gap-2 mb-12">
-                {[0, 1, 2, 3].map(i => (
+                {[0, 1, 2, 3, 4].map(i => (
                   <div key={i} className={`h-3 w-12 border-2 border-slate-900 transition-colors ${tutorialStep >= i ? 'bg-slate-900' : 'bg-slate-100'}`} />
                 ))}
               </div>
@@ -1971,17 +2605,43 @@ export default function App() {
                   <p className="text-lg md:text-2xl text-slate-600 mb-8 font-bold leading-tight">Maintain high combos for massive point bonuses. Use the shop to buy power-ups and keep your integrity at 100%!</p>
                 </motion.div>
               )}
+              {tutorialStep === 4 && (
+                <motion.div initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }}>
+                  <div className="flex justify-center gap-8 mb-12">
+                    <div className="p-6 border-8 border-blue-500 bg-white neo-brutalist-shadow">
+                      <h3 className="text-2xl font-black text-blue-500 uppercase">1v1</h3>
+                    </div>
+                    <div className="p-6 border-8 border-green-500 bg-white neo-brutalist-shadow">
+                      <h3 className="text-2xl font-black text-green-500 uppercase">2v2</h3>
+                    </div>
+                  </div>
+                  <h2 className="text-4xl md:text-6xl font-black uppercase mb-6 tracking-tighter">Multiplayer Mode</h2>
+                  <p className="text-lg md:text-2xl text-slate-600 mb-8 font-bold leading-tight">Challenge your friends in real-time! Create a match, share the code, and see who can survive the longest and score the highest.</p>
+                </motion.div>
+              )}
 
               <div className="flex gap-6 justify-center mt-12">
                 {tutorialStep > 0 && (
-                  <button onClick={() => setTutorialStep(s => s - 1)} className="px-10 py-5 border-8 border-slate-900 font-black uppercase text-xl hover:bg-slate-50 transition-all neo-brutalist-shadow">Back</button>
+                  <motion.button 
+                    layout
+                    initial={{ opacity: 0, scale: 0.8 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    onClick={() => { playSound('CLICK'); setTutorialStep(s => s - 1); }} 
+                    className="px-10 py-5 border-8 border-slate-900 font-black uppercase text-xl hover:bg-slate-50 transition-all neo-brutalist-shadow"
+                  >
+                    Back
+                  </motion.button>
                 )}
-                <button 
-                  onClick={() => tutorialStep < 3 ? setTutorialStep(s => s + 1) : setGameState('DIFFICULTY')} 
+                <motion.button 
+                  layout
+                  onClick={() => {
+                    playSound('CLICK');
+                    tutorialStep < 4 ? setTutorialStep(s => s + 1) : setGameState('DIFFICULTY');
+                  }} 
                   className="px-10 py-5 bg-slate-900 text-white font-black uppercase text-xl hover:bg-slate-800 transition-all neo-brutalist-shadow border-8 border-white"
                 >
-                  {tutorialStep < 3 ? 'Next Phase' : 'Begin Mission'}
-                </button>
+                  {tutorialStep < 4 ? 'Next Phase' : 'Begin Mission'}
+                </motion.button>
               </div>
             </div>
           </div>
@@ -2066,7 +2726,7 @@ export default function App() {
               <h2 className="text-3xl md:text-5xl font-black uppercase tracking-widest text-white flex items-center gap-4">
                 <Activity className="text-blue-500 w-8 h-8 md:w-12 md:h-12" /> Science Lab
               </h2>
-              <button onClick={() => setGameState('START')} className="p-3 bg-slate-900 rounded-full hover:bg-slate-800 transition-colors border border-slate-700 text-white"><X className="w-6 h-6 md:w-8 md:h-8" /></button>
+              <button onClick={() => setGameState(previousGameState || 'START')} className="p-3 bg-slate-900 rounded-full hover:bg-slate-800 transition-colors border border-slate-700 text-white"><X className="w-6 h-6 md:w-8 md:h-8" /></button>
             </div>
             
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 md:gap-12 max-w-7xl mx-auto">
@@ -2143,7 +2803,10 @@ export default function App() {
                 </p>
                 <div className="flex gap-4">
                   <button
-                    onClick={() => setShowExitConfirm(false)}
+                    onClick={() => {
+                      setShowExitConfirm(false);
+                      setPendingGameState(null);
+                    }}
                     className="flex-1 border-4 border-slate-900 py-4 font-black uppercase hover:bg-slate-50 transition-colors"
                   >
                     Cancel
@@ -2151,10 +2814,11 @@ export default function App() {
                   <button
                     onClick={() => {
                       setShowExitConfirm(false);
-                      setGameState('START');
+                      setGameState(pendingGameState || 'START');
                       setScore(0);
                       setEntities([]);
                       setBossActive(false);
+                      setPendingGameState(null);
                     }}
                     className="flex-1 bg-red-600 text-white border-4 border-slate-900 py-4 font-black uppercase hover:bg-red-700 transition-colors"
                   >
@@ -2169,21 +2833,38 @@ export default function App() {
         <AnimatePresence>
           {activeEasterEgg && (
             <motion.div
-              initial={{ x: 300, opacity: 0 }}
-              animate={{ x: 0, opacity: 1 }}
-              exit={{ x: 300, opacity: 0 }}
+              initial={{ y: -100, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              exit={{ y: -100, opacity: 0 }}
               transition={{ type: 'spring', damping: 20, stiffness: 100 }}
-              className="fixed right-4 top-4 md:right-8 md:top-8 z-[9999] pointer-events-none max-w-xs"
+              className="fixed top-0 left-0 right-0 z-[9999] pointer-events-none flex justify-center pt-4"
             >
-              <div className={`bg-slate-900 border-4 border-white p-4 shadow-[8px_8px_0px_0px_rgba(0,0,0,0.3)] relative ${activeEasterEgg.isRare ? 'bg-gradient-to-br from-yellow-600 to-yellow-900 border-yellow-400' : ''}`}>
-                <div className="absolute -top-3 -left-3 bg-red-600 text-white px-2 py-1 font-black uppercase tracking-widest text-[10px] animate-pulse border-2 border-white">SECRET!</div>
-                <p className="text-sm font-black uppercase tracking-tighter leading-tight text-white mt-2">
+              <div className={`bg-slate-900 border-4 border-white p-4 shadow-[8px_8px_0px_0px_rgba(0,0,0,0.3)] relative w-full max-w-2xl flex flex-col items-center text-center ${activeEasterEgg.isRare ? 'bg-gradient-to-br from-yellow-600 to-yellow-900 border-yellow-400' : ''}`}>
+                <div className="absolute -top-3 -left-3 bg-red-600 text-white px-3 py-1 font-black uppercase tracking-widest text-xs animate-pulse border-2 border-white">SECRET POWER-UP!</div>
+                
+                <h3 className="text-2xl md:text-3xl font-black uppercase tracking-tighter text-yellow-400 mt-2 flex items-center gap-2">
+                  <Zap className="w-6 h-6 md:w-8 md:h-8 fill-yellow-400" /> 
+                  {activeEasterEgg.powerup.replace('_', ' ')}
+                </h3>
+                
+                <p className="text-white font-bold text-lg md:text-xl mt-1">
+                  {activeEasterEgg.description}
+                </p>
+
+                <p className="text-sm font-black uppercase tracking-widest text-slate-400 mt-2 italic">
                   "{activeEasterEgg.message}"
                 </p>
-                <div className="mt-3 flex items-center gap-2 text-yellow-400 font-black uppercase tracking-widest text-xs bg-black/50 p-2 border-2 border-white/20">
-                  <Zap className="w-4 h-4 fill-yellow-400" /> 
-                  <span>{activeEasterEgg.powerup.replace('_', ' ')}</span>
-                </div>
+
+                {powerupEndTime && (
+                  <div className="mt-4 w-full bg-slate-800 h-2 relative overflow-hidden border border-slate-700">
+                    <motion.div 
+                      initial={{ width: '100%' }}
+                      animate={{ width: '0%' }}
+                      transition={{ duration: activeEasterEgg.duration, ease: 'linear' }}
+                      className="absolute top-0 left-0 h-full bg-yellow-400"
+                    />
+                  </div>
+                )}
               </div>
             </motion.div>
           )}
