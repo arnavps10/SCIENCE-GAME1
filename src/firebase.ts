@@ -229,8 +229,13 @@ export interface Match {
 export const createMatch = async (type: '1v1' | '2v2', hostId: string, hostName: string) => {
   if (db.type === 'mock') return null;
   const path = 'matches';
+  
+  // Generate a short 6-character alphanumeric ID
+  const shortId = Math.random().toString(36).substring(2, 8).toUpperCase();
+  
   try {
-    const docRef = await addDoc(collection(db, path), {
+    const matchRef = doc(db, 'matches', shortId);
+    await setDoc(matchRef, {
       type,
       status: 'WAITING',
       players: {
@@ -238,7 +243,7 @@ export const createMatch = async (type: '1v1' | '2v2', hostId: string, hostName:
       },
       createdAt: new Date().toISOString()
     });
-    return docRef.id;
+    return shortId;
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
     return null;

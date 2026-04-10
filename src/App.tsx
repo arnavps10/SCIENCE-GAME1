@@ -371,7 +371,7 @@ const EASTER_EGGS: EasterEggData[] = [
   { message: "Arin sucks", powerup: "ARIN_SLOW", description: "Extreme Slow Motion: Everything crawls for 20s.", duration: 20 },
   { message: "Arnav beat arin inthe shoe fight!!!", powerup: "SHOE_STRIKE", description: "Shoe Strike: Instantly clears all enemies + 500 PTS.", duration: 0 },
   { message: "Mrs.Penaverde is the best teacher!", powerup: "BEST_TEACHER", description: "Teacher's Pet: 10x Score Multiplier for 20s.", duration: 20 },
-  { message: "DNAs are so fun", powerup: "DNA_FUN", description: "DNA Overload: Full Health + 20 Shields.", duration: 0 },
+  { message: "DNAs are so fun", powerup: "DNA_FUN", description: "DNA Overload: Full Health + 20s Infinite Health.", duration: 20 },
   { message: "Kamalesh is the goat!!!", powerup: "GOAT_MODE", description: "GOAT Mode: Immunity, Score Frenzy, & Slow Mo for 30s.", duration: 30 },
   { message: "Vilo needs a job!!", powerup: "VILO_JOB", description: "Vilo's Paycheck: Massive Point Infusion (+2500 PTS).", duration: 0 },
   { message: "Mrs.Penaverde increase my grade please!!!", powerup: "GRADE_BOOST", description: "God Mode: Invincible, Max Damage, & Slow Mo for 30s.", duration: 30, isRare: true },
@@ -1179,7 +1179,9 @@ export default function App() {
           setTimeout(() => setBestTeacherActive(false), durationMs);
         } else if (pType === 'DNA_FUN') {
           setHealth(100);
-          setShieldCount(s => s + 20); // 20 shields
+          setIsImmune(true);
+          addFloatingText(window.innerWidth / 2, window.innerHeight / 2, "INFINITE HEALTH ACTIVATED!", "text-indigo-600");
+          setTimeout(() => setIsImmune(false), durationMs);
         } else if (pType === 'GOAT_MODE') {
           setIsImmune(true);
           setIsScoreFrenzy(true);
