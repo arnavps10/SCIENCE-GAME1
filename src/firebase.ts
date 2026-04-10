@@ -3,31 +3,65 @@ import { initializeApp } from 'firebase/app';
 import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, onAuthStateChanged, signOut, User as FirebaseUser } from 'firebase/auth';
 import { getFirestore, collection, doc, setDoc, getDoc, getDocs, query, where, orderBy, limit, onSnapshot, addDoc, serverTimestamp, Timestamp, deleteDoc } from 'firebase/firestore';
 
-// Default empty config to prevent build errors if file is missing
-let firebaseConfig: any = {};
-try {
-  // @ts-ignore - This file might be ignored in git
-  const configModule = await import('../firebase-applet-config.json');
-  firebaseConfig = configModule.default || configModule;
-} catch (e) {
-  console.warn("Firebase config file not found, relying on environment variables.");
-}
-
 // Support environment variables for Vercel/Production
 const config = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || firebaseConfig.apiKey,
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || firebaseConfig.authDomain,
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || firebaseConfig.projectId,
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || firebaseConfig.storageBucket,
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || firebaseConfig.messagingSenderId,
-  appId: import.meta.env.VITE_FIREBASE_APP_ID || firebaseConfig.appId,
-  firestoreDatabaseId: import.meta.env.VITE_FIREBASE_FIRESTORE_DATABASE_ID || firebaseConfig.firestoreDatabaseId
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID,
+  firestoreDatabaseId: import.meta.env.VITE_FIREBASE_FIRESTORE_DATABASE_ID
 };
 
-// Initialize Firebase SDK
-const app = initializeApp(config);
-export const db = getFirestore(app, config.firestoreDatabaseId || '(default)');
-export const auth = getAuth();
+// Initialize Firebase SDK safely
+let app: any;
+let db: any;
+let auth: any;
+
+// Helper to check if config is usable
+const isConfigValid = (c: any) => 
+  !!c.apiKey && 
+  c.apiKey !== 'undefined' && 
+  c.apiKey !== 'null' && 
+  c.apiKey.length > 10 &&
+  !c.apiKey.includes('TODO') &&
+  !c.apiKey.includes('YOUR_');
+
+let finalConfig = { ...config };
+
+// If env vars are missing, we'll try to initialize with a mock and let the UI handle it.
+// In AI Studio, the set_up_firebase tool usually provides the config.
+// If you are seeing "invalid-api-key", ensure your environment variables are set.
+
+if (isConfigValid(finalConfig)) {
+  try {
+    app = initializeApp(finalConfig);
+    db = getFirestore(app, finalConfig.firestoreDatabaseId || '(default)');
+    auth = getAuth(app);
+  } catch (error) {
+    console.error("Firebase Initialization Error:", error);
+    app = null;
+  }
+}
+
+if (!app) {
+  // Provide mock objects that won't crash the app on load, but will fail gracefully on use
+  db = { 
+    type: 'mock',
+    _databaseId: { projectId: 'mock', database: 'mock' }
+  };
+  auth = {
+    type: 'mock',
+    onAuthStateChanged: (cb: any) => {
+      setTimeout(() => cb(null), 0);
+      return () => {};
+    },
+    currentUser: null
+  };
+}
+
+export { db, auth };
 
 // --- Types ---
 
@@ -87,6 +121,7 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
 // --- Connection Test ---
 
 async function testConnection() {
+  if (!app || db.type === 'mock') return;
   try {
     await getDoc(doc(db, 'test', 'connection'));
   } catch (error) {
@@ -108,6 +143,7 @@ export const logOut = async () => {
 };
 
 export const signIn = async (email: string, password: string) => {
+  if (auth.type === 'mock') return { user: null, error: 'Firebase not initialized' };
   try {
     try {
       const result = await signInWithEmailAndPassword(auth, email, password);
@@ -128,6 +164,7 @@ export const signIn = async (email: string, password: string) => {
 // --- Firestore Helpers ---
 
 export const saveHighScore = async (userId: string, name: string, score: number) => {
+  if (db.type === 'mock') return;
   const path = `users/${userId}`;
   try {
     const userRef = doc(db, 'users', userId);
@@ -146,6 +183,7 @@ export const saveHighScore = async (userId: string, name: string, score: number)
 };
 
 export const getLeaderboard = (callback: (entries: any[]) => void) => {
+  if (db.type === 'mock') return () => {};
   const path = 'users';
   const q = query(collection(db, path), orderBy('highScore', 'desc'), limit(10));
   
@@ -158,6 +196,7 @@ export const getLeaderboard = (callback: (entries: any[]) => void) => {
 };
 
 export const sendSabotage = async (targetName: string, type: 'BLUR' | 'INVERT' | 'SPEED_UP' | 'SHAKE' | 'DARKNESS' | 'MIRROR', duration: number = 15000) => {
+  if (db.type === 'mock') return;
   const path = 'sabotages';
   try {
     await addDoc(collection(db, path), {
@@ -188,6 +227,7 @@ export interface Match {
 }
 
 export const createMatch = async (type: '1v1' | '2v2', hostId: string, hostName: string) => {
+  if (db.type === 'mock') return null;
   const path = 'matches';
   try {
     const docRef = await addDoc(collection(db, path), {
@@ -206,6 +246,7 @@ export const createMatch = async (type: '1v1' | '2v2', hostId: string, hostName:
 };
 
 export const joinMatch = async (matchId: string, userId: string, userName: string) => {
+  if (db.type === 'mock') return false;
   const path = `matches/${matchId}`;
   try {
     const matchRef = doc(db, 'matches', matchId);
@@ -239,6 +280,7 @@ export const joinMatch = async (matchId: string, userId: string, userName: strin
 };
 
 export const listenToMatch = (matchId: string, callback: (match: Match | null) => void) => {
+  if (db.type === 'mock') return () => {};
   const path = `matches/${matchId}`;
   return onSnapshot(doc(db, 'matches', matchId), (doc) => {
     if (doc.exists()) {
@@ -252,6 +294,7 @@ export const listenToMatch = (matchId: string, callback: (match: Match | null) =
 };
 
 export const updateMatchPlayer = async (matchId: string, userId: string, updates: Partial<MatchPlayer>) => {
+  if (db.type === 'mock') return;
   const path = `matches/${matchId}`;
   try {
     const matchRef = doc(db, 'matches', matchId);
@@ -264,23 +307,4 @@ export const updateMatchPlayer = async (matchId: string, userId: string, updates
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
   }
-};
-export const listenForSabotage = (name: string, callback: (sabotage: any) => void) => {
-  const path = 'sabotages';
-  const q = query(collection(db, path), where('targetName', '==', name), orderBy('timestamp', 'desc'), limit(1));
-  
-  return onSnapshot(q, (snapshot) => {
-    if (!snapshot.empty) {
-      const sabotage = snapshot.docs[0].data();
-      // Only trigger if it's recent (within last 10 seconds)
-      const sabotageTime = new Date(sabotage.timestamp).getTime();
-      if (Date.now() - sabotageTime < 10000) {
-        callback(sabotage);
-        // Delete the sabotage doc after processing to avoid re-triggering
-        deleteDoc(doc(db, 'sabotages', snapshot.docs[0].id)).catch(console.error);
-      }
-    }
-  }, (error) => {
-    handleFirestoreError(error, OperationType.LIST, path);
-  });
 };

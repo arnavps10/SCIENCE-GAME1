@@ -43,7 +43,7 @@ import {
   FastForward,
   LogOut,
 } from 'lucide-react';
-import { auth, db, signIn, logOut, saveHighScore, getLeaderboard, sendSabotage, createMatch, joinMatch, listenToMatch, updateMatchPlayer, listenForSabotage } from './firebase';
+import { auth, db, signIn, logOut, saveHighScore, getLeaderboard, sendSabotage, createMatch, joinMatch, listenToMatch, updateMatchPlayer } from './firebase';
 import { onAuthStateChanged } from 'firebase/auth';
 import { doc, getDoc, setDoc, collection, addDoc, query, where, orderBy, limit, onSnapshot, deleteDoc, getDocs } from 'firebase/firestore';
 
@@ -320,9 +320,9 @@ interface ShopItem {
 // --- Constants ---
 
 const DIFFICULTY_CONFIG = {
-  EASY: { speedMult: 1, spawnMult: 1, scoreMult: 1, healthSpawnChance: 0.08 },
-  MEDIUM: { speedMult: 1.2, spawnMult: 1.2, scoreMult: 1.5, healthSpawnChance: 0.05 },
-  HARD: { speedMult: 1.5, spawnMult: 1.5, scoreMult: 2, healthSpawnChance: 0.02 },
+  EASY: { speedMult: 0.9, spawnMult: 1, scoreMult: 1, healthSpawnChance: 0.08 },
+  MEDIUM: { speedMult: 1.08, spawnMult: 1.2, scoreMult: 1.5, healthSpawnChance: 0.05 },
+  HARD: { speedMult: 1.35, spawnMult: 1.5, scoreMult: 2, healthSpawnChance: 0.02 },
 };
 
 const LEVELS = [
@@ -333,7 +333,7 @@ const LEVELS = [
     info: "Alcohol is metabolized into acetaldehyde, a highly toxic substance and known carcinogen. Your liver works overtime to clear it.",
     baseTargetScore: 150,
     entityTypes: ['ALCOHOL', 'HEALTH_BOOST'] as EntityType[],
-    baseSpawnRate: 1400,
+    baseSpawnRate: 1540,
     hasBoss: false,
   },
   {
@@ -343,7 +343,7 @@ const LEVELS = [
     info: "The liver filters 1.4 liters of blood every minute. Pesticides and heavy metals can accumulate in liver cells, leading to chronic damage.",
     baseTargetScore: 300,
     entityTypes: ['ALCOHOL', 'TOXIN_HEAVY', 'TOXIN_PESTICIDE', 'HEALTH_BOOST'] as EntityType[],
-    baseSpawnRate: 1200,
+    baseSpawnRate: 1320,
     hasBoss: false,
   },
   {
@@ -353,7 +353,7 @@ const LEVELS = [
     info: "Hepatocellular carcinoma (HCC) is the most common primary liver cancer. It often starts as a single tumor that grows rapidly.",
     baseTargetScore: 600,
     entityTypes: ['VIRUS', 'CANCER', 'TOXIN_HEAVY', 'HEALTH_BOOST'] as EntityType[],
-    baseSpawnRate: 1000,
+    baseSpawnRate: 1100,
     hasBoss: true,
   }
 ];
@@ -381,6 +381,12 @@ const EASTER_EGGS: EasterEggData[] = [
   { message: "Saahib is an unc", powerup: "UNC_MODE", description: "Old Man Strength: Slows enemies, +5 Shields, +500 PTS.", duration: 10, isRare: true },
   { message: "Vikhyat is weird!", powerup: "VIKHYAT_WEIRD", description: "Vikhyat's Weirdness: Randomizes enemy types + 500 PTS.", duration: 0 },
   { message: "No 5 Dollars Justin", powerup: "NO_5_DOLLARS_JUSTIN", description: "Safe from next fails + 5 extra health bars", duration: 0 },
+  { message: "The liver is the largest internal organ!", powerup: "LIVER_FACT", description: "Liver Fact: Full Health + 1000 PTS.", duration: 0 },
+  { message: "Hepatocytes are the main liver cells!", powerup: "HEPATOCYTE_POWER", description: "Hepatocyte Power: Immunity for 15s.", duration: 15 },
+  { message: "The liver can regenerate itself!", powerup: "REGEN_MODE", description: "Regen Mode: Rapid Health Regeneration for 20s.", duration: 20 },
+  { message: "Liver King would be proud!", powerup: "GOAT_MODE", description: "Primal Power: Immunity & Score Frenzy for 15s.", duration: 15 },
+  { message: "Hepatocytes, assemble!", powerup: "MITO_POWER", description: "Cellular Reinforcement: Auto-Clicker for 10s.", duration: 10 },
+  { message: "Biology is life!", powerup: "LIVER_FACT", description: "Vital Knowledge: Full Health & 1000 Bonus Points.", duration: 0 },
 ];
 
 // --- Components ---
@@ -580,8 +586,11 @@ const BossTimer = ({ endTime, isAttacking }: { endTime: number | null, isAttacki
   );
 };
 
+
+
 export default function App() {
   const [gameState, setGameState] = useState<GameState>('LOGIN');
+  const [isAuthReady, setIsAuthReady] = useState(false);
   const [currentUser, setCurrentUser] = useState<{ id: string, name: string, highScore: number } | null>(null);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
@@ -629,6 +638,38 @@ export default function App() {
   const [sabotageTargetSelection, setSabotageTargetSelection] = useState<{ item: any, activeUsers: string[] } | null>(null);
   const [powerupTimers, setPowerupTimers] = useState<Record<string, number>>({});
   const [joinCode, setJoinCode] = useState('');
+  const [showShopConfirm, setShowShopConfirm] = useState<{ item: ShopItem } | null>(null);
+
+  // --- Refs for Game Loop (Prevent Stale Closures) ---
+  const healthRef = useRef(health);
+  const scoreRef = useRef(score);
+  const combosRef = useRef(combos);
+  const shieldCountRef = useRef(shieldCount);
+  const isImmuneRef = useRef(isImmune);
+  const isSlowMoRef = useRef(isSlowMo);
+  const isSpeedUpRef = useRef(isSpeedUp);
+  const isScoreFrenzyRef = useRef(isScoreFrenzy);
+  const bestTeacherActiveRef = useRef(bestTeacherActive);
+  const upgradeScoreMultRef = useRef(upgradeScoreMult);
+  const gameStateRef = useRef(gameState);
+  const isFrozenRef = useRef(isFrozen);
+  const showExitConfirmRef = useRef(showExitConfirm);
+  const entitiesRef = useRef(entities);
+
+  useEffect(() => { healthRef.current = health; }, [health]);
+  useEffect(() => { scoreRef.current = score; }, [score]);
+  useEffect(() => { combosRef.current = combos; }, [combos]);
+  useEffect(() => { shieldCountRef.current = shieldCount; }, [shieldCount]);
+  useEffect(() => { isImmuneRef.current = isImmune; }, [isImmune]);
+  useEffect(() => { isSlowMoRef.current = isSlowMo; }, [isSlowMo]);
+  useEffect(() => { isSpeedUpRef.current = isSpeedUp; }, [isSpeedUp]);
+  useEffect(() => { isScoreFrenzyRef.current = isScoreFrenzy; }, [isScoreFrenzy]);
+  useEffect(() => { bestTeacherActiveRef.current = bestTeacherActive; }, [bestTeacherActive]);
+  useEffect(() => { upgradeScoreMultRef.current = upgradeScoreMult; }, [upgradeScoreMult]);
+  useEffect(() => { gameStateRef.current = gameState; }, [gameState]);
+  useEffect(() => { isFrozenRef.current = isFrozen; }, [isFrozen]);
+  useEffect(() => { showExitConfirmRef.current = showExitConfirm; }, [showExitConfirm]);
+  useEffect(() => { entitiesRef.current = entities; }, [entities]);
   
   const gameAreaRef = useRef<HTMLDivElement>(null);
   const currentLevel = LEVELS[levelIndex];
@@ -637,9 +678,29 @@ export default function App() {
   const targetScore = Math.floor(currentLevel.baseTargetScore * config.scoreMult);
   const spawnRate = currentLevel.baseSpawnRate / config.spawnMult;
 
+  useEffect(() => {
+    if (!isMultiplayer || !currentMatch?.id) return;
+
+    const unsubscribe = listenToMatch(currentMatch.id, (match) => {
+      if (!match) {
+        setCurrentMatch(null);
+        setIsMultiplayer(false);
+        if (gameState === 'PLAYING') setGameState('START');
+        return;
+      }
+      setCurrentMatch(match);
+      if (match.status === 'PLAYING' && gameState === 'START') {
+        startGame('MEDIUM');
+      }
+    });
+
+    return () => unsubscribe();
+  }, [isMultiplayer, currentMatch?.id, gameState]);
+
   // --- Persistence ---
 
   useEffect(() => {
+    if (db.type === 'mock') return;
     const q = query(collection(db, 'leaderboard'), orderBy('score', 'desc'), limit(10));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const entries = snapshot.docs.map(doc => doc.data() as { name: string, score: number });
@@ -649,7 +710,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (currentUser) {
+    if (currentUser && db.type !== 'mock') {
       const timeoutId = setTimeout(() => {
         setDoc(doc(db, 'users', currentUser.id), {
           totalPoints,
@@ -664,7 +725,7 @@ export default function App() {
   }, [totalPoints, levelIndex, upgradeScoreMult, upgradeSpeedReduce, hasAutoClicker, currentUser]);
 
   const updateLeaderboard = async (finalScore: number) => {
-    if (!currentUser) return;
+    if (!currentUser || db.type === 'mock') return;
     
     try {
       const newEntry = {
@@ -689,31 +750,40 @@ export default function App() {
   // --- Firebase Auth & Sabotage Listeners ---
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
-      if (user) {
-        const userRef = doc(db, 'users', user.uid);
-        const userDoc = await getDoc(userRef);
-        if (userDoc.exists()) {
-          const userData = userDoc.data();
-          setCurrentUser({ id: user.uid, name: userData.name, highScore: userData.highScore || 0 });
-          
-          if (userData.totalPoints !== undefined) setTotalPoints(userData.totalPoints);
-          if (userData.levelIndex !== undefined) setLevelIndex(userData.levelIndex);
-          if (userData.upgradeScoreMult !== undefined) setUpgradeScoreMult(userData.upgradeScoreMult);
-          if (userData.upgradeSpeedReduce !== undefined) setUpgradeSpeedReduce(userData.upgradeSpeedReduce);
-          if (userData.hasAutoClicker !== undefined) setHasAutoClicker(userData.hasAutoClicker);
-          
-          setGameState('START');
+      if (user && db.type !== 'mock') {
+        try {
+          const userRef = doc(db, 'users', user.uid);
+          const userDoc = await getDoc(userRef);
+          if (userDoc.exists()) {
+            const userData = userDoc.data();
+            setCurrentUser({ id: user.uid, name: userData.name, highScore: userData.highScore || 0 });
+            
+            if (userData.totalPoints !== undefined) setTotalPoints(userData.totalPoints);
+            if (userData.levelIndex !== undefined) setLevelIndex(userData.levelIndex);
+            if (userData.upgradeScoreMult !== undefined) setUpgradeScoreMult(userData.upgradeScoreMult);
+            if (userData.upgradeSpeedReduce !== undefined) setUpgradeSpeedReduce(userData.upgradeSpeedReduce);
+            if (userData.hasAutoClicker !== undefined) setHasAutoClicker(userData.hasAutoClicker);
+            
+            setGameState('START');
+          } else {
+            // User exists in Auth but not in Firestore yet
+            // This happens during the registration flow in handleLogin
+            // We'll let handleLogin handle the state transition
+          }
+        } catch (error) {
+          console.error("Auth State Error:", error);
         }
       } else {
         setGameState('LOGIN');
       }
+      setIsAuthReady(true);
     });
 
     return () => unsubscribe();
   }, []);
 
   useEffect(() => {
-    if (!currentUser) return;
+    if (db.type === 'mock' || !currentUser) return;
 
     const path = 'sabotages';
     const q = query(collection(db, path), where('targetName', '==', currentUser.name), orderBy('timestamp', 'desc'), limit(1));
@@ -790,8 +860,27 @@ export default function App() {
       const { user, error } = await signIn(email, trimmedPass);
       if (user) {
         const userRef = doc(db, 'users', user.uid);
-        await setDoc(userRef, { name: student.name, password: student.password }, { merge: true });
-        setCurrentUser({ id: user.uid, name: student.name, highScore: 0 });
+        const userDoc = await getDoc(userRef);
+        let userData = userDoc.exists() ? userDoc.data() : null;
+        
+        if (!userDoc.exists()) {
+          await setDoc(userRef, { name: student.name, password: student.password, highScore: 0, totalPoints: 0 }, { merge: true });
+        }
+
+        setCurrentUser({ 
+          id: user.uid, 
+          name: student.name, 
+          highScore: userData?.highScore || 0 
+        });
+
+        if (userData) {
+          if (userData.totalPoints !== undefined) setTotalPoints(userData.totalPoints);
+          if (userData.levelIndex !== undefined) setLevelIndex(userData.levelIndex);
+          if (userData.upgradeScoreMult !== undefined) setUpgradeScoreMult(userData.upgradeScoreMult);
+          if (userData.upgradeSpeedReduce !== undefined) setUpgradeSpeedReduce(userData.upgradeSpeedReduce);
+          if (userData.hasAutoClicker !== undefined) setHasAutoClicker(userData.hasAutoClicker);
+        }
+
         setGameState('START');
       } else {
         if (error === 'auth/operation-not-allowed') {
@@ -820,7 +909,7 @@ export default function App() {
     else if (health < 70) healthSpawnChance = 0.05; // 5% chance if damaged
     
     // Check how many health boosts are already on screen to prevent flooding
-    const existingHealthBoosts = entities.filter(e => e.type === 'HEALTH_BOOST').length;
+    const existingHealthBoosts = entitiesRef.current.filter(e => e.type === 'HEALTH_BOOST').length;
     if (existingHealthBoosts >= 2) healthSpawnChance = 0; // Max 2 at a time
 
     const isHealthBoost = Math.random() < healthSpawnChance;
@@ -1135,6 +1224,18 @@ export default function App() {
         } else if (pType === 'NO_5_DOLLARS_JUSTIN') {
           setShieldCount(s => s + 1);
           setHealth(h => Math.min(100, h + 5));
+        } else if (pType === 'LIVER_FACT') {
+          setHealth(100);
+          setScore(s => s + 1000);
+          setTotalPoints(p => p + 1000);
+        } else if (pType === 'HEPATOCYTE_POWER') {
+          setIsImmune(true);
+          setTimeout(() => setIsImmune(false), durationMs);
+        } else if (pType === 'REGEN_MODE') {
+          const regenInterval = setInterval(() => {
+            setHealth(h => Math.min(100, h + 2));
+          }, 1000);
+          setTimeout(() => clearInterval(regenInterval), durationMs);
         }
 
         setTimeout(() => {
@@ -1181,11 +1282,24 @@ export default function App() {
     }
 
     if (totalPoints >= item.cost) {
-      if (!window.confirm(`Are you sure you want to buy ${item.name} for ${item.cost} credits?`)) {
-        return;
-      }
-      
+      setShowShopConfirm({ item });
+    } else {
+      setShopFeedback({ message: "NOT ENOUGH CREDITS", type: 'error' });
+      setTimeout(() => setShopFeedback(null), 2000);
+    }
+  };
+
+  const confirmPurchase = async () => {
+    if (!showShopConfirm) return;
+    const { item } = showShopConfirm;
+    setShowShopConfirm(null);
+
+    if (totalPoints >= item.cost) {
       if (item.id.startsWith('SABOTAGE_')) {
+        if (db.type === 'mock') {
+          addFloatingText(window.innerWidth / 2, window.innerHeight / 2, "FIREBASE NOT INITIALIZED", "text-red-500");
+          return;
+        }
         try {
           const usersSnapshot = await getDocs(collection(db, 'users'));
           const activeUsers = usersSnapshot.docs
@@ -1263,9 +1377,9 @@ export default function App() {
       setBossPhaseEndTime(Date.now() + 5000);
       attackTimeout = setTimeout(() => {
         setBossAttacking(false);
-        const vulnerableDuration = 7000 + Math.random() * 3000;
+        const vulnerableDuration = 9000 + Math.random() * 3000;
         setBossPhaseEndTime(Date.now() + vulnerableDuration);
-        vulnerableTimeout = setTimeout(startAttackPhase, vulnerableDuration); // 7-10 seconds vulnerable
+        vulnerableTimeout = setTimeout(startAttackPhase, vulnerableDuration); // 9-12 seconds vulnerable
       }, 5000); // 5 seconds attacking
     };
 
@@ -1304,7 +1418,7 @@ export default function App() {
       playSound('MUTATION');
 
       // Random Health Boost during boss fight
-      if (Math.random() > 0.85) {
+      if (Math.random() > 0.75) {
         const newHealthBoost: Entity = {
           id: Math.random(),
           x: Math.random() * (rect.width - 40),
@@ -1318,6 +1432,25 @@ export default function App() {
           spawnTime: Date.now(),
         };
         setEntities(prev => [...prev, newHealthBoost]);
+      }
+
+      // Random Easter Egg during boss fight
+      if (Math.random() > 0.92) {
+        const eggData = EASTER_EGGS[Math.floor(Math.random() * EASTER_EGGS.length)];
+        const newEgg: Entity = {
+          id: Date.now() + Math.random(),
+          x: Math.random() * (rect.width - 60),
+          y: -60,
+          type: 'EASTER_EGG',
+          size: 60,
+          speed: 2,
+          health: 1,
+          maxHealth: 1,
+          rotation: 0,
+          spawnTime: Date.now(),
+          easterEggData: eggData
+        };
+        setEntities(prev => [...prev, newEgg]);
       }
     }, 800);
 
@@ -1384,22 +1517,25 @@ export default function App() {
           let newX = e.x;
           let newY = e.y;
           
+          // Apply multipliers to movement speed
+          const speedMultiplier = (isSlowMoRef.current ? 0.5 : 1) * (isSpeedUpRef.current ? 1.5 : 1);
+
           if (e.type === 'BOSS') {
             if (gameAreaRef.current) {
               const rect = gameAreaRef.current.getBoundingClientRect();
-              // Faster and wider movement
-              newX = (rect.width / 2 - 100) + Math.sin(now / 800) * (rect.width / 2.5) + Math.cos(now / 400) * 50;
-              newY = 100 + Math.sin(now / 600) * 50 + Math.cos(now / 300) * 30;
+              // Slower and wider movement
+              newX = (rect.width / 2 - 100) + Math.sin(now / 1200) * (rect.width / 2.5) + Math.cos(now / 600) * 50;
+              newY = 100 + Math.sin(now / 900) * 50 + Math.cos(now / 450) * 30;
               
               // Keep within bounds
               newX = Math.max(0, Math.min(rect.width - 200, newX));
               newY = Math.max(50, Math.min(rect.height / 2, newY));
             }
           } else if (e.type === 'EASTER_EGG' && e.direction) {
-            newX += e.direction.x * e.speed;
-            newY += e.direction.y * e.speed;
+            newX += e.direction.x * e.speed * speedMultiplier;
+            newY += e.direction.y * e.speed * speedMultiplier;
           } else {
-            newY += e.speed;
+            newY += e.speed * speedMultiplier;
           }
 
           // Cancer Mutation Logic
@@ -1421,9 +1557,9 @@ export default function App() {
         if (missed.length > 0) {
           missed.forEach(e => {
             if (e.type !== 'HEALTH_BOOST' && e.type !== 'BOSS' && e.type !== 'TIME_DILATION' && e.type !== 'DETOX_BLAST' && e.type !== 'IMMUNITY' && e.type !== 'SCORE_FRENZY' && e.type !== 'EASTER_EGG' && e.type !== 'LAVA_BALL') {
-              if (shieldCount > 0) {
+              if (shieldCountRef.current > 0) {
                 setShieldCount(s => s - 1);
-              } else if (!isImmune) {
+              } else if (!isImmuneRef.current) {
                 playSound('MISS');
                 setHealth(h => {
                   const newHealth = Math.max(0, h - 10);
@@ -1444,7 +1580,7 @@ export default function App() {
       clearInterval(spawnInterval);
       clearInterval(moveInterval);
     };
-  }, [gameState, spawnEntity, spawnRate, shieldCount]);
+  }, [gameState, spawnEntity, spawnRate]);
 
   // Win/Loss Condition
   useEffect(() => {
@@ -1474,12 +1610,7 @@ export default function App() {
       const matchId = await createMatch(type, currentUser.id, currentUser.name);
       if (matchId) {
         setIsMultiplayer(true);
-        listenToMatch(matchId, (match) => {
-          setCurrentMatch(match);
-          if (match?.status === 'PLAYING') {
-            startGame('MEDIUM'); // Default difficulty for multiplayer
-          }
-        });
+        setCurrentMatch({ id: matchId, type, status: 'WAITING' });
       }
     };
 
@@ -1489,12 +1620,7 @@ export default function App() {
       const success = await joinMatch(joinCode, currentUser.id, currentUser.name);
       if (success) {
         setIsMultiplayer(true);
-        listenToMatch(joinCode, (match) => {
-          setCurrentMatch(match);
-          if (match?.status === 'PLAYING') {
-            startGame('MEDIUM');
-          }
-        });
+        setCurrentMatch({ id: joinCode, status: 'WAITING' });
       } else {
         alert("Failed to join match. Check the code or if the match is full.");
       }
@@ -1508,9 +1634,9 @@ export default function App() {
       >
         <button 
           onClick={() => { playSound('CLICK'); setGameState('START'); }}
-          className="absolute top-6 left-6 p-2 text-slate-400 hover:text-slate-900 transition-colors"
+          className="absolute top-6 left-6 p-2 text-slate-400 hover:text-slate-900 transition-colors flex items-center gap-2 font-black uppercase text-sm"
         >
-          <X className="w-8 h-8" />
+          <ArrowLeft className="w-6 h-6" /> Exit
         </button>
 
         <h2 className="text-4xl md:text-5xl font-black uppercase mb-8 text-slate-900">Multiplayer</h2>
@@ -1576,6 +1702,17 @@ export default function App() {
             <p className="text-slate-500 font-bold animate-pulse mt-4">
               {currentMatch.status === 'WAITING' ? 'Waiting for players...' : 'Starting match...'}
             </p>
+
+            <button 
+              onClick={() => {
+                playSound('CLICK');
+                setCurrentMatch(null);
+                setIsMultiplayer(false);
+              }}
+              className="mt-4 text-slate-500 hover:text-slate-900 font-bold uppercase text-sm border-b-2 border-slate-200 hover:border-slate-900 transition-all"
+            >
+              Leave Lobby
+            </button>
           </div>
         )}
       </motion.div>
@@ -2200,6 +2337,50 @@ export default function App() {
       >
         Return to Mission
       </button>
+
+      {/* Shop Confirmation Modal */}
+      <AnimatePresence>
+        {showShopConfirm && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-slate-950/80 z-[200] flex items-center justify-center p-4 backdrop-blur-sm"
+          >
+            <motion.div
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.9, y: 20 }}
+              className="bg-white border-8 border-slate-900 p-8 max-w-md w-full neo-brutalist-shadow text-center"
+            >
+              <div className="w-20 h-20 bg-slate-100 border-4 border-slate-900 flex items-center justify-center mx-auto mb-6 neo-brutalist-shadow">
+                {showShopConfirm.item.icon}
+              </div>
+              <h3 className="text-3xl font-black uppercase tracking-tighter mb-2">Confirm Purchase</h3>
+              <p className="text-slate-600 font-bold mb-1">
+                Buy <span className="text-slate-900">{showShopConfirm.item.name}</span>?
+              </p>
+              <p className="text-2xl font-black text-slate-900 mb-8">
+                {showShopConfirm.item.cost} CREDITS
+              </p>
+              <div className="flex gap-4">
+                <button
+                  onClick={() => setShowShopConfirm(null)}
+                  className="flex-1 border-4 border-slate-900 py-4 font-black uppercase hover:bg-slate-50 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={confirmPurchase}
+                  className="flex-1 bg-slate-900 text-white border-4 border-slate-900 py-4 font-black uppercase hover:bg-slate-800 transition-colors"
+                >
+                  Confirm
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 
@@ -2314,7 +2495,27 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-200 flex p-0 md:p-4 overflow-y-auto">
-      <main className={`m-auto w-full md:max-w-4xl min-h-screen md:min-h-[900px] bg-white border-0 md:border-[12px] border-slate-900 shadow-none md:shadow-[30px_30px_0px_0px_rgba(15,23,42,1)] overflow-y-auto overflow-x-hidden relative flex flex-col transition-all duration-500 ${isBlurry ? 'blur-md' : ''} ${isInverted ? 'invert' : ''} ${isMirror ? '-scale-x-100' : ''} ${screenShake ? 'animate-[shake_0.2s_ease-in-out_infinite]' : ''} ${isSpinning ? 'animate-spin' : ''}`}>
+      {(auth as any).type === 'mock' ? (
+        <div className="m-auto max-w-md bg-white border-8 border-red-600 p-8 neo-brutalist-shadow text-center">
+          <AlertCircle className="w-16 h-16 text-red-600 mx-auto mb-6" />
+          <h2 className="text-3xl font-black uppercase mb-4">Firebase Required</h2>
+          <p className="text-slate-600 font-bold mb-8">
+            The HepatoHero system requires a Firebase connection. Please click the <strong>"Set up Firebase"</strong> button in the AI Studio UI to initialize the database.
+          </p>
+          <button 
+            onClick={() => window.location.reload()}
+            className="w-full py-4 bg-slate-900 text-white font-black uppercase hover:bg-slate-800 transition-colors"
+          >
+            Retry Connection
+          </button>
+        </div>
+      ) : !isAuthReady ? (
+        <div className="m-auto flex flex-col items-center justify-center">
+          <Activity className="w-16 h-16 text-slate-900 animate-pulse mb-4" />
+          <p className="font-black uppercase tracking-widest text-slate-900">Initializing Systems...</p>
+        </div>
+      ) : (
+        <main className={`m-auto w-full md:max-w-4xl min-h-screen md:min-h-[900px] bg-white border-0 md:border-[12px] border-slate-900 shadow-none md:shadow-[30px_30px_0px_0px_rgba(15,23,42,1)] overflow-y-auto overflow-x-hidden relative flex flex-col transition-all duration-500 ${isBlurry ? 'blur-md' : ''} ${isInverted ? 'invert' : ''} ${isMirror ? '-scale-x-100' : ''} ${screenShake ? 'animate-[shake_0.2s_ease-in-out_infinite]' : ''} ${isSpinning ? 'animate-spin' : ''}`}>
         {gameState === 'LOGIN' && (
           <div className="flex flex-col items-center justify-center p-6 md:p-12 flex-1 py-12 bg-slate-50">
             <div className="w-full max-w-md bg-white border-8 border-slate-900 p-8 neo-brutalist-shadow">
@@ -2870,6 +3071,7 @@ export default function App() {
           )}
         </AnimatePresence>
       </main>
+      )}
     </div>
   );
 }

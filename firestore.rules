@@ -1,36 +1,49 @@
-// ===============================================================
-// Assumed Data Model
-// ===============================================================
-//
-// Collection: users
-// Document ID: userId
-// Fields:
-//   - name: string (required) - Full name of the student
-//   - password: string (required) - Specific password for the student
-//   - highScore: number (optional) - Highest score achieved
-//   - lastPlayed: string (optional) - ISO 8601 timestamp
-//
-// Collection: leaderboard
-// Document ID: entryId
-// Fields:
-//   - userId: string (required) - ID of the user who achieved the score
-//   - name: string (required) - Name of the user
-//   - score: number (required) - The score achieved
-//   - timestamp: string (required) - ISO 8601 timestamp
-//
-// Collection: sabotages
-// Document ID: sabotageId
-// Fields:
-//   - targetName: string (required) - Name of the user being sabotaged
-//   - type: string (required) - Type of sabotage (BLUR, INVERT, SPEED_UP)
-//   - duration: number (required) - Duration in milliseconds
-//   - timestamp: string (required) - ISO 8601 timestamp
-//
-// ===============================================================
-
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Document ID: {userId} (Firebase Auth UID)
+    // Fields:
+    //   - name: string (required, <100 chars)
+    //   - password: string (required, <100 chars)
+    //   - highScore: number (optional)
+    //   - lastPlayed: string (optional, ISO 8601)
+    //   - totalPoints: number (optional)
+    //   - levelIndex: number (optional)
+    //   - upgradeScoreMult: number (optional)
+    //   - upgradeSpeedReduce: number (optional)
+    //   - hasAutoClicker: boolean (optional)
+    //
+    // Collection: leaderboard
+    // Document ID: {entryId}
+    // Fields:
+    //   - userId: string (required, must match auth.uid)
+    //   - name: string (required, <100 chars)
+    //   - score: number (required)
+    //   - timestamp: string (required, ISO 8601)
+    //
+    // Collection: sabotages
+    // Document ID: {sabotageId}
+    // Fields:
+    //   - targetName: string (required, <100 chars)
+    //   - type: string (required, enum)
+    //   - duration: number (required, <60000)
+    //   - timestamp: string (required, ISO 8601)
+    //
+    // Collection: matches
+    // Document ID: {matchId}
+    // Fields:
+    //   - type: string (required, enum)
+    //   - status: string (required, enum)
+    //   - players: map (required)
+    //   - createdAt: string (required, ISO 8601)
+    //
+    // ===============================================================
 
     // ===============================================================
     // Helper Functions
@@ -44,65 +57,104 @@ service cloud.firestore {
       return isAuthenticated() && request.auth.uid == userId;
     }
 
+    function isValidDateString(dateStr) {
+      return dateStr is string && dateStr.matches("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}.*Z?$");
+    }
+
+    // --- Domain Validators ---
+
     function isValidUser(data) {
-      return data.keys().hasAll(['name', 'password']) &&
+      let requiredFields = ['name', 'password'];
+      let optionalFields = ['highScore', 'lastPlayed', 'totalPoints', 'levelIndex', 'upgradeScoreMult', 'upgradeSpeedReduce', 'hasAutoClicker'];
+      
+      return data.keys().hasAll(requiredFields) &&
+             data.keys().hasOnly(requiredFields.concat(optionalFields)) &&
              data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
-             data.password is string && data.password.size() > 0;
+             data.password is string && data.password.size() > 0 && data.password.size() < 100 &&
+             (!('highScore' in data) || data.highScore is number) &&
+             (!('totalPoints' in data) || data.totalPoints is number) &&
+             (!('levelIndex' in data) || data.levelIndex is number) &&
+             (!('upgradeScoreMult' in data) || data.upgradeScoreMult is number) &&
+             (!('upgradeSpeedReduce' in data) || data.upgradeSpeedReduce is number) &&
+             (!('hasAutoClicker' in data) || data.hasAutoClicker is bool) &&
+             (!('lastPlayed' in data) || isValidDateString(data.lastPlayed));
     }
 
     function isValidLeaderboardEntry(data) {
       return data.keys().hasAll(['userId', 'name', 'score', 'timestamp']) &&
-             data.userId is string &&
-             data.name is string &&
+             data.keys().hasOnly(['userId', 'name', 'score', 'timestamp']) &&
+             data.userId == request.auth.uid &&
+             data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
              data.score is number &&
-             data.timestamp is string;
+             isValidDateString(data.timestamp);
     }
 
     function isValidSabotage(data) {
       return data.keys().hasAll(['targetName', 'type', 'duration', 'timestamp']) &&
-             data.targetName is string &&
-             data.type in ['BLUR', 'INVERT', 'SPEED_UP', 'SHAKE', 'DARKNESS', 'MIRROR'] &&
-             data.duration is number &&
-             data.timestamp is string;
+             data.keys().hasOnly(['targetName', 'type', 'duration', 'timestamp']) &&
+             data.targetName is string && data.targetName.size() > 0 && data.targetName.size() < 100 &&
+             data.type in ['BLUR', 'INVERT', 'SPEED_UP', 'SHAKE', 'DARKNESS', 'MIRROR', 'FREEZE', 'SPIN'] &&
+             data.duration is number && data.duration > 0 && data.duration < 60000 &&
+             isValidDateString(data.timestamp);
+    }
+
+    function isValidMatch(data) {
+      return data.keys().hasAll(['type', 'status', 'players', 'createdAt']) &&
+             data.keys().hasOnly(['type', 'status', 'players', 'createdAt']) &&
+             data.type in ['1v1', '2v2'] &&
+             data.status in ['WAITING', 'PLAYING', 'FINISHED'] &&
+             data.players is map &&
+             isValidDateString(data.createdAt);
     }
 
     // ===============================================================
-    // Collection Rules
+    // Rules
     // ===============================================================
 
     match /users/{userId} {
-      // Allow reading only own profile or for authentication check (simulated via query)
-      allow read: if isAuthenticated();
-      // Allow creation only if the user is the owner (this is for the initial setup)
-      allow create: if isAuthenticated() && isOwner(userId) && isValidUser(request.resource.data);
-      // Allow updating high scores and lastPlayed
-      allow update: if isAuthenticated() && isOwner(userId) && isValidUser(request.resource.data);
+      // Users can only read their own profile (contains password/PII)
+      allow read: if isOwner(userId);
+      
+      // Allow creation if authenticated and data is valid
+      allow create: if isOwner(userId) && isValidUser(request.resource.data);
+      
+      // Allow update if owner and data is valid
+      allow update: if isOwner(userId) && isValidUser(request.resource.data);
     }
 
     match /leaderboard/{entryId} {
-      // Leaderboard is public for all authenticated students
+      // Leaderboard is publicly readable for authenticated users
       allow read: if isAuthenticated();
-      // Only allow creation of entries that match the user's ID
-      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid && isValidLeaderboardEntry(request.resource.data);
-      // Leaderboard entries are immutable
+      
+      // Anyone authenticated can create an entry (validated)
+      allow create: if isAuthenticated() && isValidLeaderboardEntry(request.resource.data);
+      
+      // Entries are immutable
       allow update, delete: if false;
     }
 
     match /sabotages/{sabotageId} {
-      // Students can see sabotages targeting them
+      // Players listen for sabotages targeting them
       allow read: if isAuthenticated();
-      // Any student can sabotage another student
+      
+      // Players can send sabotages to others
       allow create: if isAuthenticated() && isValidSabotage(request.resource.data);
-      // Sabotages are cleaned up by the client or expire
+      
+      // Players delete sabotages after they are processed
       allow delete: if isAuthenticated();
+      
       allow update: if false;
     }
 
     match /matches/{matchId} {
       allow read: if isAuthenticated();
-      allow create: if isAuthenticated();
-      allow update: if isAuthenticated();
-      allow delete: if isAuthenticated();
+      
+      allow create: if isAuthenticated() && isValidMatch(request.resource.data);
+      
+      // Allow players to join and update match state
+      allow update: if isAuthenticated() && isValidMatch(request.resource.data);
+      
+      allow delete: if false;
     }
   }
 }
