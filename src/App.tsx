@@ -689,7 +689,7 @@ export default function App() {
         return;
       }
       setCurrentMatch(match);
-      if (match.status === 'PLAYING' && gameState === 'START') {
+      if (match.status === 'PLAYING' && gameState === 'MULTIPLAYER_LOBBY') {
         startGame('MEDIUM');
       }
     });
