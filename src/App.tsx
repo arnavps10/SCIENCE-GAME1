@@ -258,7 +258,8 @@ const STUDENTS = [
   { name: "Olena Trushel", password: "Olena2026!" },
   { name: "Marwa Wafa", password: "Marwa2026!" },
   { name: "Huibo Yang", password: "Huibo2026!" },
-  { name: "Michael Zhao", password: "Michael2026!" }
+  { name: "Michael Zhao", password: "Michael2026!" },
+  { name: "Best Teacher", password: "Teacher2026!" }
 ];
 
 type GameState = 'LOGIN' | 'START' | 'DIFFICULTY' | 'PLAYING' | 'BOSS_INTRO' | 'LEVEL_TRANSITION' | 'LEVEL_COMPLETE' | 'GAME_OVER' | 'GAME_FINISHED' | 'SHOP' | 'LEADERBOARD' | 'TUTORIAL' | 'INFO' | 'MULTIPLAYER_LOBBY';
