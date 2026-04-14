@@ -842,6 +842,24 @@ export default function App() {
     await logOut();
     setCurrentUser(null);
     setGameState('LOGIN');
+    // Reset all game state to prevent data leakage between users
+    setTotalPoints(0);
+    setLevelIndex(0);
+    setScore(0);
+    setHealth(100);
+    setUpgradeScoreMult(1);
+    setUpgradeSpeedReduce(1);
+    setHasAutoClicker(false);
+    setEntities([]);
+    setCombos(0);
+    setShieldCount(0);
+    setIsSlowMo(false);
+    setIsImmune(false);
+    setIsScoreFrenzy(false);
+    setBossActive(false);
+    setActiveEasterEgg(null);
+    setIsMultiplayer(false);
+    setCurrentMatch(null);
   };
 
   const handleLogin = async (name: string, pass: string) => {
@@ -856,6 +874,26 @@ export default function App() {
 
     setIsLoggingIn(true);
     setLoginError(null);
+    
+    // Reset state before login to ensure a clean slate
+    setTotalPoints(0);
+    setLevelIndex(0);
+    setScore(0);
+    setHealth(100);
+    setUpgradeScoreMult(1);
+    setUpgradeSpeedReduce(1);
+    setHasAutoClicker(false);
+    setEntities([]);
+    setCombos(0);
+    setShieldCount(0);
+    setIsSlowMo(false);
+    setIsImmune(false);
+    setIsScoreFrenzy(false);
+    setBossActive(false);
+    setActiveEasterEgg(null);
+    setIsMultiplayer(false);
+    setCurrentMatch(null);
+
     try {
       const email = `${trimmedName.toLowerCase().replace(/[^a-z0-9]/g, '')}@hepatohero.com`;
       const { user, error } = await signIn(email, trimmedPass);
@@ -868,12 +906,7 @@ export default function App() {
           await setDoc(userRef, { name: student.name, password: student.password, highScore: 0, totalPoints: 0 }, { merge: true });
         }
 
-        setCurrentUser({ 
-          id: user.uid, 
-          name: student.name, 
-          highScore: userData?.highScore || 0 
-        });
-
+        // Load data into state BEFORE setting currentUser to avoid triggering the save effect with old data
         if (userData) {
           if (userData.totalPoints !== undefined) setTotalPoints(userData.totalPoints);
           if (userData.levelIndex !== undefined) setLevelIndex(userData.levelIndex);
@@ -881,6 +914,12 @@ export default function App() {
           if (userData.upgradeSpeedReduce !== undefined) setUpgradeSpeedReduce(userData.upgradeSpeedReduce);
           if (userData.hasAutoClicker !== undefined) setHasAutoClicker(userData.hasAutoClicker);
         }
+
+        setCurrentUser({ 
+          id: user.uid, 
+          name: student.name, 
+          highScore: userData?.highScore || 0 
+        });
 
         setGameState('START');
       } else {
